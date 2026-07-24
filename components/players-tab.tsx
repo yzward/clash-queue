@@ -10,11 +10,11 @@ import {
 import { toast } from "sonner";
 
 import {
-  addEntrantAction,
   confirmEntrantAction,
   importHumanitixAction,
   withdrawEntrantAction,
 } from "@/app/t/[id]/actions";
+import { AddPlayerDialog } from "@/components/add-player-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -224,8 +224,6 @@ export function PlayersTab({
   tournamentCapacity: number | null;
 }) {
   const [addOpen, setAddOpen] = useState(false);
-  const [addName, setAddName] = useState("");
-  const [addError, setAddError] = useState<string | null>(null);
 
   const [withdrawTarget, setWithdrawTarget] = useState<Entrant | null>(null);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
@@ -259,40 +257,9 @@ export function PlayersTab({
   const capacityLabel =
     tournamentCapacity != null ? String(tournamentCapacity) : "∞";
 
-  const submitAdd = () => {
-    setAddError(null);
-    const name = addName.trim();
-    if (!name) {
-      setAddError("Player name is required");
-      return;
-    }
-
-    const tempId = `temp-${crypto.randomUUID()}`;
-    const optimisticEntrant: Entrant = {
-      id: tempId,
-      tournament_id: tournamentId,
-      player_id: null,
-      entrant_status: "confirmed",
-      status: "registered",
-      startgg_entrant_id: null,
-      confirmed_at: new Date().toISOString(),
-      registration_source: "manual",
-      players: {
-        id: tempId,
-        display_name: name,
-        username: null,
-        discord_id: null,
-      },
-    };
-
-    setAddOpen(false);
-    setAddName("");
-    startTransition(async () => {
-      applyOptimistic({ type: "add", entrant: optimisticEntrant });
-      const result = await addEntrantAction(tournamentId, name);
-      if (!result.ok) {
-        toast.error(result.error);
-      }
+  const handleAddSuccess = (entrant: Entrant) => {
+    startTransition(() => {
+      applyOptimistic({ type: "add", entrant });
     });
   };
 
@@ -374,11 +341,7 @@ export function PlayersTab({
           <Button
             type="button"
             size="sm"
-            onClick={() => {
-              setAddError(null);
-              setAddName("");
-              setAddOpen(true);
-            }}
+            onClick={() => setAddOpen(true)}
             className="gap-1.5"
           >
             <Plus className="size-3.5" />
@@ -416,55 +379,12 @@ export function PlayersTab({
         </div>
       )}
 
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Add player</DialogTitle>
-            <DialogDescription>
-              We&apos;ll create a player record if one doesn&apos;t exist with
-              this exact name.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <label
-              htmlFor="player-name"
-              className="text-xs font-medium text-muted-foreground"
-            >
-              Player name
-            </label>
-            <Input
-              id="player-name"
-              value={addName}
-              onChange={(event) => setAddName(event.target.value)}
-              placeholder="e.g. Drawzy"
-              maxLength={60}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  submitAdd();
-                }
-              }}
-              autoFocus
-            />
-            {addError ? (
-              <p className="text-sm text-destructive">{addError}</p>
-            ) : null}
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setAddOpen(false)}
-              disabled={pending}
-            >
-              Cancel
-            </Button>
-            <Button type="button" onClick={submitAdd} disabled={pending}>
-              {pending ? "Adding…" : "Add"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <AddPlayerDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        tournamentId={tournamentId}
+        onSuccess={handleAddSuccess}
+      />
 
       <Dialog
         open={withdrawTarget != null}

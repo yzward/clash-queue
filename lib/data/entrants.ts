@@ -174,6 +174,71 @@ export async function listEntrants(tournamentId: string): Promise<Entrant[]> {
   return ((data ?? []) as Record<string, unknown>[]).map(mapEntrantRow);
 }
 
+async function insertManualEntrant(
+  tournamentId: string,
+  playerId: string,
+  confirmedByPlayerId: string
+): Promise<Entrant> {
+  const admin = createAdminClient();
+
+  const { data: existing } = await admin
+    .from("tournament_entrants")
+    .select("id")
+    .eq("tournament_id", tournamentId)
+    .eq("player_id", playerId)
+    .maybeSingle();
+
+  if (existing) {
+    throw new Error("Player is already entered in this tournament");
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await admin
+    .from("tournament_entrants")
+    .insert({
+      tournament_id: tournamentId,
+      player_id: playerId,
+      entrant_status: "confirmed",
+      status: "registered",
+      confirmed_by: confirmedByPlayerId,
+      confirmed_at: now,
+      registration_source: "manual",
+    })
+    .select(ENTRANT_SELECT)
+    .single();
+
+  if (error) {
+    console.error("[insertManualEntrant]", error);
+    throw new Error(`Failed to add entrant: ${error.message}`);
+  }
+
+  return mapEntrantRow(data as Record<string, unknown>);
+}
+
+export async function addEntrantByPlayerId(
+  tournamentId: string,
+  playerId: string,
+  confirmedByPlayerId: string
+): Promise<Entrant> {
+  const admin = createAdminClient();
+
+  const { data: player, error } = await admin
+    .from("players")
+    .select("id")
+    .eq("id", playerId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Player lookup failed: ${error.message}`);
+  }
+  if (!player) {
+    throw new Error("Player not found");
+  }
+
+  return insertManualEntrant(tournamentId, player.id, confirmedByPlayerId);
+}
+
 export async function addEntrantManual(
   tournamentId: string,
   displayName: string,
@@ -191,38 +256,7 @@ export async function addEntrantManual(
     player = await createPlayer(admin, trimmed);
   }
 
-  const { data: existing } = await admin
-    .from("tournament_entrants")
-    .select("id")
-    .eq("tournament_id", tournamentId)
-    .eq("player_id", player.id)
-    .maybeSingle();
-
-  if (existing) {
-    throw new Error("Player is already entered in this tournament");
-  }
-
-  const now = new Date().toISOString();
-  const { data, error } = await admin
-    .from("tournament_entrants")
-    .insert({
-      tournament_id: tournamentId,
-      player_id: player.id,
-      entrant_status: "confirmed",
-      status: "registered",
-      confirmed_by: confirmedByPlayerId,
-      confirmed_at: now,
-      registration_source: "manual",
-    })
-    .select(ENTRANT_SELECT)
-    .single();
-
-  if (error) {
-    console.error("[addEntrantManual]", error);
-    throw new Error(`Failed to add entrant: ${error.message}`);
-  }
-
-  return mapEntrantRow(data as Record<string, unknown>);
+  return insertManualEntrant(tournamentId, player.id, confirmedByPlayerId);
 }
 
 export async function updateEntrantStatus(

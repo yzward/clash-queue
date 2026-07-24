@@ -10,12 +10,17 @@ import {
   renameCourt,
 } from "@/lib/data/courts";
 import {
+  addEntrantByPlayerId,
   addEntrantManual,
   EntrantInMatchError,
   type Entrant,
   updateEntrantStatus,
   withdrawEntrant,
 } from "@/lib/data/entrants";
+import {
+  searchPlayers,
+  type PlayerSearchResult,
+} from "@/lib/data/players";
 import {
   HumanitixConfigError,
   HumanitixResponseError,
@@ -33,6 +38,10 @@ export type ActionResult =
 
 export type AddEntrantResult =
   | { ok: true; entrant: Entrant }
+  | { ok: false; error: string };
+
+export type SearchPlayersResult =
+  | { ok: true; players: PlayerSearchResult[] }
   | { ok: false; error: string };
 
 export type ImportHumanitixResult =
@@ -114,29 +123,49 @@ export async function deleteCourtAction(
   }
 }
 
+export async function searchPlayersAction(
+  query: string
+): Promise<SearchPlayersResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const players = await searchPlayers(query);
+    return { ok: true, players };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Player search failed";
+    console.error("[searchPlayersAction]", err);
+    return { ok: false, error: message };
+  }
+}
+
 export async function addEntrantAction(
   tournamentId: string,
-  displayName: string
+  opts: { playerId?: string; displayName?: string }
 ): Promise<AddEntrantResult> {
   const auth = await requireTO();
   if (!auth.authorised) {
     return { ok: false, error: "Not authorised" };
   }
 
-  const trimmed = displayName.trim();
-  if (!trimmed) {
-    return { ok: false, error: "Player name is required" };
+  const playerId = opts.playerId?.trim() || undefined;
+  const displayName = opts.displayName?.trim() || undefined;
+
+  if (!playerId && !displayName) {
+    return { ok: false, error: "player_or_name_required" };
   }
-  if (trimmed.length > 60) {
+
+  if (displayName && displayName.length > 60) {
     return { ok: false, error: "Player name must be under 60 characters" };
   }
 
   try {
-    const entrant = await addEntrantManual(
-      tournamentId,
-      trimmed,
-      auth.playerId
-    );
+    const entrant = playerId
+      ? await addEntrantByPlayerId(tournamentId, playerId, auth.playerId)
+      : await addEntrantManual(tournamentId, displayName!, auth.playerId);
     revalidatePath(`/t/${tournamentId}`);
     return { ok: true, entrant };
   } catch (err) {
