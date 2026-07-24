@@ -335,7 +335,7 @@ export function AddPlayerDialog({
                       : "2px solid transparent",
                 }}
                 onMouseEnter={() => setHighlight(results.length)}
-                onClick={() => submitSelection(createOption)}
+                onClick={() => setHighlight(results.length)}
               >
                 <span
                   className="flex size-6 shrink-0 items-center justify-center rounded-full"
