@@ -3,9 +3,11 @@ import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
 import { CourtsTab } from "@/components/courts-tab";
+import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
 import { requireTO } from "@/lib/auth/require-to";
 import { listCourts } from "@/lib/data/courts";
+import { listEntrants } from "@/lib/data/entrants";
 import {
   getTournamentDetail,
   type TournamentDetail,
@@ -236,10 +238,11 @@ export default async function TournamentDetailPage({
   const { tab: rawTab } = await searchParams;
   const activeTab = resolveTab(rawTab);
 
-  const [tournament, preflight, courts] = await Promise.all([
+  const [tournament, preflight, courts, entrants] = await Promise.all([
     getTournamentDetail(id),
     runPreflightChecks(id),
     listCourts(id),
+    listEntrants(id),
   ]);
 
   if (!tournament) {
@@ -326,6 +329,12 @@ export default async function TournamentDetailPage({
           <OverviewTab
             tournament={tournament}
             preflight={tournament.status === "pending" ? preflight : null}
+          />
+        ) : activeTab === "players" ? (
+          <PlayersTab
+            initialEntrants={entrants}
+            tournamentId={tournament.id}
+            tournamentCapacity={tournament.capacity}
           />
         ) : activeTab === "courts" ? (
           <CourtsTab initialCourts={courts} tournamentId={tournament.id} />

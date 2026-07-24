@@ -37,7 +37,7 @@ export async function getTournamentDetail(
         .maybeSingle(),
       admin
         .from("tournament_entrants")
-        .select("status")
+        .select("entrant_status")
         .eq("tournament_id", id),
       admin
         .from("matches")
@@ -54,9 +54,15 @@ export async function getTournamentDetail(
     return null;
   }
 
-  const entrantRows = (entrantsResult.data ?? []) as { status: string | null }[];
-  const confirmed = entrantRows.filter((e) => e.status === "confirmed").length;
-  const pending = entrantRows.filter((e) => e.status === "pending").length;
+  const entrantRows = (entrantsResult.data ?? []) as {
+    entrant_status: string | null;
+  }[];
+  const confirmed = entrantRows.filter(
+    (e) => e.entrant_status === "confirmed"
+  ).length;
+  const pending = entrantRows.filter(
+    (e) => e.entrant_status === "pending"
+  ).length;
 
   return {
     id: tournament.id as string,

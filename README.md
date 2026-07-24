@@ -37,8 +37,9 @@ Open `http://localhost:3000`. You'll land on the placeholder site — sign in wi
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase browser client key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side admin key (never exposed to browser) |
 | `CHALLONGE_API_KEY` | Challonge v2.1 API key (paid tier) |
+| `HUMANITIX_API_KEY` | Humanitix API key for ticket import |
 
-All four are the same values as the CSP project.
+Supabase + Challonge values match the CSP project. Humanitix is shared with CSP when configured.
 
 ## Deployment
 

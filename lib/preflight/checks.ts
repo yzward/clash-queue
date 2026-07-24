@@ -78,7 +78,7 @@ export async function runPreflightChecks(
         .maybeSingle(),
       admin
         .from("tournament_entrants")
-        .select("id, status, startgg_entrant_id")
+        .select("id, entrant_status, status, startgg_entrant_id")
         .eq("tournament_id", tournamentId),
       admin
         .from("matches")
@@ -126,6 +126,7 @@ export async function runPreflightChecks(
 
   const entrants = (entrantsResult.data ?? []) as Array<{
     id: string;
+    entrant_status: string | null;
     status: string | null;
     startgg_entrant_id: string | number | null;
   }>;
@@ -400,7 +401,9 @@ export async function runPreflightChecks(
   );
 
   // ── AMBER: pending_entrant_signups ───────────────────────────────────────
-  const pendingCount = entrants.filter((e) => e.status === "pending").length;
+  const pendingCount = entrants.filter(
+    (e) => e.entrant_status === "pending"
+  ).length;
   checks.push(
     pendingCount === 0
       ? pass({
@@ -421,7 +424,7 @@ export async function runPreflightChecks(
   // ── AMBER: player_count_meets_minimum ────────────────────────────────────
   if (minimumPlayers != null && minimumPlayers > 0) {
     const confirmedCount = entrants.filter(
-      (e) => e.status === "confirmed" || e.status === "registered"
+      (e) => e.entrant_status === "confirmed"
     ).length;
     checks.push(
       confirmedCount >= minimumPlayers
@@ -435,7 +438,7 @@ export async function runPreflightChecks(
             id: "player_count_meets_minimum",
             severity: "amber",
             title: "Player count meets minimum",
-            detail: `${confirmedCount} confirmed — need ${minimumPlayers}`,
+            detail: `${confirmedCount} confirmed - need ${minimumPlayers}`,
             fix_action: { label: "Review players", tab: "players" },
           })
     );
