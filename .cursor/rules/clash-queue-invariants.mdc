@@ -1,0 +1,95 @@
+---
+description: Clash Queue architectural invariants — always apply
+alwaysApply: true
+---
+
+# Clash Queue invariants
+
+Clash Queue is a tournament management platform for TOs running Clash League NZ events. It shares a Supabase database with ClashStatsPro (CSP) but is a separate app with its own auth entry, deploy pipeline, and UI language.
+
+## Stack — non-negotiable
+
+- Next.js 16 (App Router, no `src/` directory)
+- TypeScript
+- Tailwind CSS
+- shadcn/ui (source in `components/ui/`, we own it)
+- Supabase (`@supabase/ssr` for browser and server clients, `@supabase/supabase-js` for admin)
+- Server Actions primary; API routes only for webhooks, tablet endpoints, and Challonge callbacks
+- Deployed on Vercel (region: `syd1` — Sydney)
+
+## Cursor behaviour
+
+- Diagnose first, patch second. When I describe a bug, give me a clear diagnosis and a fix brief before writing code.
+- Prefer isolated, minimal diffs over rewrites. Do not refactor unless the current failure requires it.
+- If ambiguous, make a reasonable assumption and flag it — don't ask first.
+- No em dashes in generated content or docs. NZ spelling and DD/MM/YYYY dates.
+- Skip preamble. Don't repeat the request back before answering.
+
+## Auth
+
+- Users authenticate against the shared Supabase user pool.
+- Login screen lives at `/login` — separate from CSP's `/auth/login`. Users log in twice across the two apps by design.
+- Only users with `Admin` or `Ops` role in the shared `user_roles` → `roles` schema may access Clash Queue past `/login`.
+- Role check: `players.auth_user_id → user_roles.player_id → roles.name`. Role names are capitalised exactly: `Admin`, `Ops`, `Referee`, `Team Captain`, `Stream Operator`, `Player`, `Organiser`.
+- The `requireTO()` helper (`lib/auth/require-to.ts`) is the gate. Every server component in a protected route calls it.
+- Middleware lives in `proxy.ts` (Next.js 16 renamed `middleware.ts`). It handles session refresh only; role checks happen in the page via `requireTO`.
+
+## Database — shared with CSP
+
+- Sydney Supabase project: `ictdttpregkjjadxdhbu`.
+- We read and write the same tables CSP uses. Do not create parallel tables or fork the schema.
+- Ownership convention: Clash Queue owns writes for match state, court assignments, finish events, tournament lifecycle transitions. CSP owns writes for player profiles, teams, and public event content. Overlap zones (tournament creation, entrants) may be written by either app but must remain logically consistent.
+- All migrations must be tracked in `supabase/migrations/` and coordinated across both apps. Test on a preview before shipping.
+
+## Schema facts — hard-won, do not forget
+
+- `players.auth_user_id` (NOT `user_id`) links to Supabase Auth user.
+- `players.discord_id` is a direct column on players.
+- `tournament_entrants.player_id` and `tournament_entrants.confirmed_by` both FK to `players.id`. When joining `players(...)`, use the explicit FK hint `players!tournament_entrants_player_id_fkey(...)` or Supabase throws PGRST201.
+- `tournament_entrants.status` (`registered` / `active`) is not the same as `tournament_entrants.entrant_status` (`pending` / `confirmed` / `expired`). Never conflate.
+- `tournament_entrants.startgg_entrant_id` is misnamed — it holds the current Challonge participant ID. Historical column name from an older start.gg integration.
+- `tournaments.landing_page_content` (jsonb) is CSP-only. Clash Queue does not write to it.
+- `tournaments.status` values in use: `pending`, `active`, `in_progress`, `completed`. `Draft` is a UI-level concept derived from pre-flight state; not a DB value.
+- `matches.status` values in use: `pending`, `grabbed`, `in_progress`, `submitted`. `challonge_match_id` is nullable and only populated after Challonge sync.
+- `courts.current_match_id` is nullable; null means the court is free.
+- `finish_events.scorer_player_id` for a PEN event is the FOULING player; the OPPONENT receives the point. Do not conflate.
+
+## Challonge — API v2.1 only
+
+- Base URL: `https://api.challonge.com/v2.1`.
+- Auth headers: `Authorization: <CHALLONGE_API_KEY>` plus `Authorization-Type: v1`. Also send `Content-Type: application/vnd.api+json` and `Accept: application/json`.
+- Response format is JSON:API — data lives under `data.attributes.*`. All Challonge helpers in `lib/challonge/client.ts` must flatten this so callers get typed flat objects.
+- "Started" bracket states include: `underway`, `group_stages_underway`, `complete` (and possibly others surfaced by v2.1 — verify against live API before assuming).
+- Group stage settings live under `group_stage_options` — `group_size` and `participant_count_to_advance_per_group`.
+- Never re-introduce v1 URL patterns (`api_key` in query string). If a legacy pattern shows up in a prompt, that's a mistake — flag it.
+- Never mask Challonge errors with silent success. Every Challonge call site must handle failures explicitly and surface a specific error, not a generic 500.
+
+## Design system
+
+- Dark theme only. No light mode toggle.
+- Base: `#0a0a12` app background, `#17161f` card surface, `rgba(255,255,255,0.06)` borders.
+- Brand purple `#a78bfa` is the primary UI accent — buttons, tab underlines, progress rings, focus states.
+- Brand orange `#f97316` is the RSG-influenced accent — used sparingly, for the logo border, section labels (`◆ NEEDS ATTENTION`), and the "+ New tournament" and "Start tournament" CTAs. Never for body content or standard UI accents.
+- Live green `#22c55e` is reserved for live-state signalling only — pills, dot indicators, thin top-border strips on live event cards. Never for the base of a working surface.
+- Warning amber `#fbbf24`, blocker red `#ef4444`, both used only on pre-flight and error states.
+- Scorer: Player 1 purple `#a78bfa`, Player 2 cyan `#22d3ee` — matches CSP's existing convention so refs feel zero relearning.
+- Sentence case throughout body copy. UPPERCASE is reserved for tiny meta labels only (section headers, LIVE pill, uppercase micro-tags on player panels).
+- Angular clip-path treatment is a brand moment — reserved for the CLASH QUEUE logo and primary CTAs. Do not apply it to standard UI buttons.
+- Live surfaces get a differentiated treatment: 2px green top-border, tinted background, bigger scores, higher visual density. Setup surfaces stay calm.
+
+## Content and voice
+
+- No em dashes anywhere in generated content, docs, or UI copy.
+- NZ spelling and grammar: organisation not organization, colour not color, etc.
+- Dates: DD/MM/YYYY in UI copy; ISO in code and DB.
+- Currency: NZD.
+- Do not refer to the operator as "user" in UI copy. Use "you" or "TO" (context-dependent).
+- Sponsors, players, and league name references stay consistent with CSP.
+
+## Testing and validation
+
+- Before writing code that touches a new column or FK, verify the actual schema with an `information_schema.columns` query. Do not trust prior assumptions.
+- `NOTIFY pgrst, 'reload schema';` returns "Success. No rows returned" — that is the expected success message, not an error.
+- Multi-step tournament result mutations must be run in this order and verified: (1) set placement, (2) set points_awarded, (3) increment ranking_points. Step 3 is not safely reversible without a recalc pass. UPDATE returns "Success. No rows returned"; always follow up with a SELECT count to verify.
+- Use `.maybeSingle()` on SELECT lookups. `.single()` post-insert `.select().single()` is fine.
+- Case-insensitive matching (`ilike` or `lower(trim(...))`) is essential when matching external names (Challonge display names) against CSP player records.
