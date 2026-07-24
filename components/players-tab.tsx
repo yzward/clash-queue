@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, MoreHorizontal, Plus } from "lucide-react";
+import { ChevronDown, Loader2, MoreHorizontal, Plus } from "lucide-react";
 import {
   useMemo,
   useOptimistic,
@@ -12,7 +12,11 @@ import { toast } from "sonner";
 import {
   confirmEntrantAction,
   importHumanitixAction,
+  pushToChallongeAction,
+  syncFromChallongeAction,
   withdrawEntrantAction,
+  type PushToChallongeResult,
+  type SyncFromChallongeResult,
 } from "@/app/t/[id]/actions";
 import { AddPlayerDialog } from "@/components/add-player-dialog";
 import { Button } from "@/components/ui/button";
@@ -108,17 +112,25 @@ function formatSubLine(entrant: Entrant): string {
 function EntrantRow({
   entrant,
   tournamentId,
+  challongeLinked,
   onOptimistic,
   onRequestWithdraw,
 }: {
   entrant: Entrant;
   tournamentId: string;
+  challongeLinked: boolean;
   onOptimistic: (update: OptimisticUpdate) => void;
   onRequestWithdraw: (entrant: Entrant) => void;
 }) {
   const [pending, startTransition] = useTransition();
   const name = entrant.players?.display_name ?? "Unknown player";
   const isPending = entrant.entrant_status === "pending";
+  const missingChallonge =
+    challongeLinked &&
+    entrant.entrant_status === "confirmed" &&
+    !entrant.startgg_entrant_id;
+  const onChallonge = Boolean(entrant.startgg_entrant_id);
+  const amberBorder = isPending || missingChallonge;
 
   const confirm = () => {
     startTransition(async () => {
@@ -130,13 +142,25 @@ function EntrantRow({
     });
   };
 
+  const statusLabel = isPending
+    ? "Pending"
+    : missingChallonge
+      ? "Not on Challonge"
+      : "Confirmed";
+
+  const statusStyle = isPending
+    ? { background: "rgba(251,191,36,0.12)", color: "#fbbf24" }
+    : missingChallonge
+      ? { background: "rgba(251,191,36,0.12)", color: "#fbbf24" }
+      : { background: "rgba(34,197,94,0.12)", color: "#86efac" };
+
   return (
     <div
       className="flex items-center gap-3 rounded-[6px] px-3 py-2.5"
       style={{
         background: "rgba(255,255,255,0.02)",
         border: "1px solid rgba(255,255,255,0.06)",
-        borderLeft: isPending
+        borderLeft: amberBorder
           ? "2px solid rgba(251,191,36,0.3)"
           : "1px solid rgba(255,255,255,0.06)",
       }}
@@ -144,7 +168,7 @@ function EntrantRow({
       <span
         className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold"
         style={
-          isPending
+          isPending || missingChallonge
             ? {
                 background: "rgba(251,191,36,0.15)",
                 color: "#fcd34d",
@@ -168,21 +192,23 @@ function EntrantRow({
         </p>
       </div>
 
+      {challongeLinked && onChallonge ? (
+        <span
+          className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            color: "rgba(255,255,255,0.45)",
+          }}
+        >
+          ↔ Challonge
+        </span>
+      ) : null}
+
       <span
         className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium"
-        style={
-          isPending
-            ? {
-                background: "rgba(251,191,36,0.12)",
-                color: "#fbbf24",
-              }
-            : {
-                background: "rgba(34,197,94,0.12)",
-                color: "#86efac",
-              }
-        }
+        style={statusStyle}
       >
-        {isPending ? "Pending" : "Confirmed"}
+        {statusLabel}
       </span>
 
       <DropdownMenu>
@@ -218,11 +244,14 @@ export function PlayersTab({
   initialEntrants,
   tournamentId,
   tournamentCapacity,
+  challongeId,
 }: {
   initialEntrants: Entrant[];
   tournamentId: string;
   tournamentCapacity: number | null;
+  challongeId: string | null;
 }) {
+  const challongeLinked = Boolean(challongeId);
   const [addOpen, setAddOpen] = useState(false);
 
   const [withdrawTarget, setWithdrawTarget] = useState<Entrant | null>(null);
@@ -236,6 +265,16 @@ export function PlayersTab({
     skipped: number;
     errors: string[];
   } | null>(null);
+
+  const [pushOpen, setPushOpen] = useState(false);
+  const [pullOpen, setPullOpen] = useState(false);
+  const [pushResult, setPushResult] = useState<
+    Extract<PushToChallongeResult, { ok: true }> | null
+  >(null);
+  const [pullResult, setPullResult] = useState<
+    Extract<SyncFromChallongeResult, { ok: true }> | null
+  >(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   const [pending, startTransition] = useTransition();
   const [optimisticEntrants, applyOptimistic] = useOptimistic(
@@ -254,6 +293,13 @@ export function PlayersTab({
   const pendingCount = optimisticEntrants.filter(
     (e) => e.entrant_status === "pending"
   ).length;
+  const needingPush = useMemo(
+    () =>
+      optimisticEntrants.filter(
+        (e) => e.entrant_status === "confirmed" && !e.startgg_entrant_id
+      ),
+    [optimisticEntrants]
+  );
   const capacityLabel =
     tournamentCapacity != null ? String(tournamentCapacity) : "∞";
 
@@ -304,6 +350,34 @@ export function PlayersTab({
     });
   };
 
+  const runPush = () => {
+    setSyncError(null);
+    setPushResult(null);
+    startTransition(async () => {
+      const result = await pushToChallongeAction(tournamentId);
+      if (!result.ok) {
+        setSyncError(result.error);
+        toast.error(result.error);
+        return;
+      }
+      setPushResult(result);
+    });
+  };
+
+  const runPull = () => {
+    setSyncError(null);
+    setPullResult(null);
+    startTransition(async () => {
+      const result = await syncFromChallongeAction(tournamentId);
+      if (!result.ok) {
+        setSyncError(result.error);
+        toast.error(result.error);
+        return;
+      }
+      setPullResult(result);
+    });
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -327,17 +401,44 @@ export function PlayersTab({
           >
             Import from Humanitix
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled
-            title="Challonge push arrives in the next step"
-            className="border-dashed text-muted-foreground"
-            style={{ borderColor: "rgba(255,255,255,0.2)" }}
-          >
-            Push to Challonge - coming soon
-          </Button>
+
+          {challongeLinked ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  style={{ borderColor: "rgba(255,255,255,0.15)" }}
+                >
+                  Challonge sync
+                  <ChevronDown className="size-3.5 opacity-70" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => {
+                    setSyncError(null);
+                    setPushResult(null);
+                    setPushOpen(true);
+                  }}
+                >
+                  ↑ Push to Challonge
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setSyncError(null);
+                    setPullResult(null);
+                    setPullOpen(true);
+                  }}
+                >
+                  ↓ Pull from Challonge
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+
           <Button
             type="button"
             size="sm"
@@ -369,6 +470,7 @@ export function PlayersTab({
               key={entrant.id}
               entrant={entrant}
               tournamentId={tournamentId}
+              challongeLinked={challongeLinked}
               onOptimistic={applyOptimistic}
               onRequestWithdraw={(target) => {
                 setWithdrawError(null);
@@ -385,6 +487,219 @@ export function PlayersTab({
         tournamentId={tournamentId}
         onSuccess={handleAddSuccess}
       />
+
+      <Dialog
+        open={pushOpen}
+        onOpenChange={(open) => {
+          setPushOpen(open);
+          if (!open) {
+            setSyncError(null);
+            setPushResult(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Push to Challonge</DialogTitle>
+            <DialogDescription>
+              Push {needingPush.length} entrant
+              {needingPush.length === 1 ? "" : "s"} to Challonge? This creates
+              participants on Challonge&apos;s side and stores their IDs locally.
+            </DialogDescription>
+          </DialogHeader>
+
+          {needingPush.length > 0 ? (
+            <ul className="max-h-40 space-y-1 overflow-y-auto rounded-[6px] border border-white/10 bg-white/5 px-3 py-2 text-[12px] text-white/80">
+              {needingPush.map((e) => (
+                <li key={e.id}>
+                  {e.players?.display_name ?? "Unknown player"}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              All confirmed entrants already have Challonge IDs.
+            </p>
+          )}
+
+          {syncError && pushOpen ? (
+            <p className="text-sm text-destructive">{syncError}</p>
+          ) : null}
+
+          {pushResult ? (
+            <div className="space-y-2">
+              <div
+                className="rounded-[6px] px-3 py-2 text-sm"
+                style={{
+                  background: "rgba(34,197,94,0.1)",
+                  color: "#86efac",
+                }}
+              >
+                ✓ Pushed {pushResult.pushed} entrant
+                {pushResult.pushed === 1 ? "" : "s"}
+              </div>
+              {pushResult.failures.map((f) => (
+                <div
+                  key={`${f.entrantName}-${f.reason}`}
+                  className="rounded-[6px] px-3 py-2 text-sm"
+                  style={{
+                    background: "rgba(251,191,36,0.1)",
+                    color: "#fcd34d",
+                  }}
+                >
+                  {f.entrantName}: {f.reason}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            {pushResult ? (
+              <Button type="button" onClick={() => setPushOpen(false)}>
+                Close
+              </Button>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setPushOpen(false)}
+                  disabled={pending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  onClick={runPush}
+                  disabled={pending || needingPush.length === 0}
+                  className="gap-1.5"
+                >
+                  {pending ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      Working...
+                    </>
+                  ) : (
+                    "Push"
+                  )}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pullOpen}
+        onOpenChange={(open) => {
+          setPullOpen(open);
+          if (!open) {
+            setSyncError(null);
+            setPullResult(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pull from Challonge</DialogTitle>
+            <DialogDescription>
+              Pull participant IDs from Challonge? This updates local entrant
+              records to match Challonge&apos;s current participant list.
+            </DialogDescription>
+          </DialogHeader>
+
+          {syncError && pullOpen ? (
+            <p className="text-sm text-destructive">{syncError}</p>
+          ) : null}
+
+          {pullResult ? (
+            <div className="space-y-2">
+              <div
+                className="rounded-[6px] px-3 py-2 text-sm"
+                style={{
+                  background: "rgba(34,197,94,0.1)",
+                  color: "#86efac",
+                }}
+              >
+                ✓ Updated {pullResult.updated} entrant ID
+                {pullResult.updated === 1 ? "" : "s"}
+              </div>
+              {pullResult.unmatched_challonge.length > 0 ? (
+                <div
+                  className="rounded-[6px] px-3 py-2 text-sm"
+                  style={{
+                    background: "rgba(251,191,36,0.1)",
+                    color: "#fcd34d",
+                  }}
+                >
+                  {pullResult.unmatched_challonge.length} Challonge participant
+                  {pullResult.unmatched_challonge.length === 1 ? "" : "s"} not
+                  matched: {pullResult.unmatched_challonge.join(", ")}
+                </div>
+              ) : null}
+              {pullResult.unmatched_local.length > 0 ? (
+                <div
+                  className="rounded-[6px] px-3 py-2 text-sm"
+                  style={{
+                    background: "rgba(251,191,36,0.1)",
+                    color: "#fcd34d",
+                  }}
+                >
+                  {pullResult.unmatched_local.length} local entrant
+                  {pullResult.unmatched_local.length === 1 ? "" : "s"} not on
+                  Challonge: {pullResult.unmatched_local.join(", ")}
+                </div>
+              ) : null}
+              {pullResult.errors.map((err) => (
+                <div
+                  key={err}
+                  className="rounded-[6px] px-3 py-2 text-sm"
+                  style={{
+                    background: "rgba(251,191,36,0.1)",
+                    color: "#fcd34d",
+                  }}
+                >
+                  {err}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            {pullResult ? (
+              <Button type="button" onClick={() => setPullOpen(false)}>
+                Close
+              </Button>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setPullOpen(false)}
+                  disabled={pending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  onClick={runPull}
+                  disabled={pending}
+                  className="gap-1.5"
+                >
+                  {pending ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      Working...
+                    </>
+                  ) : (
+                    "Pull"
+                  )}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={withdrawTarget != null}
@@ -477,10 +792,7 @@ export function PlayersTab({
           </div>
           <DialogFooter>
             {humanitixResult ? (
-              <Button
-                type="button"
-                onClick={() => setHumanitixOpen(false)}
-              >
+              <Button type="button" onClick={() => setHumanitixOpen(false)}>
                 Close
               </Button>
             ) : (

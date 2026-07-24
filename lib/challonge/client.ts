@@ -7,11 +7,20 @@
  * - Responses are JSON:API: { data: { id, type, attributes, relationships } }
  *   or { data: [ ... ] } for collections
  * - Tournament `state` observed: "group_stages_underway" (not only "underway"/"complete")
- * - Group stages live under attributes.group_stage_enabled + attributes.group_stage_options
+ * - Group stages live under attributes.group_stage_options
  *   ({ group_size, participant_count_to_advance_per_group, stage_type, ... })
  * - Participant ids are strings in data.id; attributes include name, seed, misc
  * - Match player ids live in relationships.player1/player2.data.id (not attributes)
  * - URL slug (nl7udlbm) and numeric id both work in /tournaments/{id}.json paths
+ *
+ * Write shapes (2026-07-25, from Challonge v2.1 OpenAPI / Apidog; live POST
+ * verification blocked locally because CHALLONGE_API_KEY is Sensitive on Vercel
+ * and `vercel env pull` returns an empty placeholder):
+ * - POST /tournaments/{id}/participants.json
+ *   body: { data: { type: "participant", attributes: { name, seed?, misc? } } }
+ * - POST /tournaments/{id}/participants/bulk_add.json
+ *   body: { data: { type: "Participants", attributes: { participants: [{ name, ... }] } } }
+ *   max 20 per request
  */
 
 import type {
@@ -36,6 +45,26 @@ export class ChallongeError extends Error {
   }
 }
 
+export class ChallongePushError extends Error {
+  readonly code = "CHALLONGE_PUSH_ERROR" as const;
+  status: number;
+  body: unknown;
+
+  constructor(message: string, status = 400, body?: unknown) {
+    super(message);
+    this.name = "ChallongePushError";
+    this.status = status;
+    this.body = body ?? null;
+  }
+}
+
+/** Bracket states where Challonge rejects new participants. */
+export const CHALLONGE_PUSH_BLOCKED_STATES = new Set([
+  "underway",
+  "group_stages_underway",
+  "complete",
+]);
+
 type JsonApiResource = {
   id?: string;
   type?: string;
@@ -54,6 +83,18 @@ type JsonApiDocument = {
   data?: JsonApiResource | JsonApiResource[] | null;
   included?: JsonApiResource[];
   errors?: Array<{ detail?: string; title?: string; status?: string }>;
+};
+
+export type ChallongeParticipantInput = {
+  name: string;
+  seed?: number;
+  misc?: string;
+};
+
+export type ChallongePushedParticipant = {
+  id: string;
+  name: string;
+  seed: number | null;
 };
 
 function getApiKey(): string {
@@ -277,4 +318,159 @@ export async function getChallongeMatches(
 
   const rows = Array.isArray(doc.data) ? doc.data : doc.data ? [doc.data] : [];
   return rows.map(normaliseMatch);
+}
+
+function flattenPushedParticipant(
+  resource: JsonApiResource
+): ChallongePushedParticipant {
+  const attrs = resource.attributes ?? {};
+  return {
+    id: String(resource.id ?? ""),
+    name: String(attrs.name ?? ""),
+    seed: typeof attrs.seed === "number" ? attrs.seed : null,
+  };
+}
+
+function extractPushErrorMessage(err: unknown): string {
+  if (err instanceof ChallongeError) {
+    const doc = err.body as JsonApiDocument | null;
+    const detail =
+      doc?.errors?.[0]?.detail ||
+      doc?.errors?.[0]?.title ||
+      err.message.replace(/^Challonge \d+:\s*/, "");
+    return detail || "Challonge rejected the participant";
+  }
+  if (err instanceof Error) return err.message;
+  return "Challonge push failed";
+}
+
+/**
+ * Create a single Challonge participant.
+ * Body shape: { data: { type: "participant", attributes: { name, seed?, misc? } } }
+ * (v2.1 Create Participant OpenAPI default type is singular "participant".)
+ */
+export async function pushParticipant(
+  challongeId: string,
+  participant: ChallongeParticipantInput
+): Promise<ChallongePushedParticipant> {
+  const attributes: Record<string, unknown> = {
+    name: participant.name,
+  };
+  if (participant.seed != null) attributes.seed = participant.seed;
+  if (participant.misc != null) attributes.misc = participant.misc;
+
+  try {
+    const doc = await challongeRequest<JsonApiDocument>(
+      `/tournaments/${encodeURIComponent(challongeId)}/participants.json`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          data: {
+            type: "participant",
+            attributes,
+          },
+        }),
+      }
+    );
+
+    if (!doc.data || Array.isArray(doc.data)) {
+      console.error("[challonge:push] unexpected create response", doc);
+      throw new ChallongePushError(
+        "Challonge returned an unexpected participant response"
+      );
+    }
+
+    const created = flattenPushedParticipant(doc.data);
+    if (!created.id) {
+      throw new ChallongePushError("Challonge did not return a participant id");
+    }
+    return created;
+  } catch (err) {
+    if (err instanceof ChallongePushError) throw err;
+    console.error("[challonge:push]", err);
+    if (err instanceof ChallongeError && err.status >= 400 && err.status < 500) {
+      throw new ChallongePushError(
+        extractPushErrorMessage(err),
+        err.status,
+        err.body
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Bulk-create Challonge participants.
+ *
+ * Endpoint (v2.1 OpenAPI): POST /tournaments/{id}/participants/bulk_add.json
+ * Body: { data: { type: "Participants", attributes: { participants: [{ name, seed?, misc? }] } } }
+ * Max 20 participants per request.
+ *
+ * Live bulk verification was not possible locally (Sensitive env key not pullable via
+ * `vercel env pull`). This function only calls the bulk endpoint — callers that need
+ * per-entrant failure isolation should fall back to sequential `pushParticipant`
+ * with a 100ms delay (same reliability preference CSP used for v1 sync-out).
+ */
+export async function pushParticipantsBulk(
+  challongeId: string,
+  participants: ChallongeParticipantInput[]
+): Promise<ChallongePushedParticipant[]> {
+  if (participants.length === 0) return [];
+
+  const created: ChallongePushedParticipant[] = [];
+
+  for (let i = 0; i < participants.length; i += 20) {
+    const chunk = participants.slice(i, i + 20);
+
+    try {
+      const doc = await challongeRequest<JsonApiDocument>(
+        `/tournaments/${encodeURIComponent(challongeId)}/participants/bulk_add.json`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            data: {
+              type: "Participants",
+              attributes: {
+                participants: chunk.map((p) => {
+                  const row: Record<string, unknown> = { name: p.name };
+                  if (p.seed != null) row.seed = p.seed;
+                  if (p.misc != null) row.misc = p.misc;
+                  return row;
+                }),
+              },
+            },
+          }),
+        }
+      );
+
+      const rows = Array.isArray(doc.data)
+        ? doc.data
+        : doc.data
+          ? [doc.data]
+          : [];
+
+      if (rows.length === 0) {
+        throw new ChallongePushError(
+          "Challonge bulk_add returned no participants"
+        );
+      }
+
+      for (const row of rows) {
+        created.push(flattenPushedParticipant(row));
+      }
+    } catch (err) {
+      console.error("[challonge:push] bulk_add failed", err);
+      if (err instanceof ChallongePushError) throw err;
+      if (err instanceof ChallongeError && err.status >= 400 && err.status < 500) {
+        throw new ChallongePushError(
+          extractPushErrorMessage(err),
+          err.status,
+          err.body
+        );
+      }
+      throw err;
+    }
+  }
+
+  return created;
 }

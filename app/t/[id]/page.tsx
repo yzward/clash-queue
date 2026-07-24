@@ -335,6 +335,7 @@ export default async function TournamentDetailPage({
             initialEntrants={entrants}
             tournamentId={tournament.id}
             tournamentCapacity={tournament.capacity}
+            challongeId={tournament.challonge_id}
           />
         ) : activeTab === "courts" ? (
           <CourtsTab initialCourts={courts} tournamentId={tournament.id} />

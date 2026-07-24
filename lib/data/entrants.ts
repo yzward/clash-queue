@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getChallongeParticipants } from "@/lib/challonge/client";
 
 export type EntrantPlayer = {
   id: string;
@@ -350,6 +351,121 @@ export async function resolveOrCreatePlayerForImport(
 
   const created = await createPlayer(admin, displayName, email);
   return { id: created.id, created: true };
+}
+
+export async function getEntrantsNeedingPush(
+  tournamentId: string
+): Promise<Entrant[]> {
+  const admin = createAdminClient();
+
+  const { data, error } = await admin
+    .from("tournament_entrants")
+    .select(ENTRANT_SELECT)
+    .eq("tournament_id", tournamentId)
+    .eq("entrant_status", "confirmed")
+    .is("startgg_entrant_id", null)
+    .order("confirmed_at", { ascending: true, nullsFirst: true })
+    .order("id", { ascending: true });
+
+  if (error) {
+    console.error("[getEntrantsNeedingPush]", error);
+    throw new Error(`Failed to load entrants needing push: ${error.message}`);
+  }
+
+  return ((data ?? []) as Record<string, unknown>[]).map(mapEntrantRow);
+}
+
+export async function setEntrantChallongeId(
+  entrantId: string,
+  challongeParticipantId: string
+): Promise<void> {
+  const admin = createAdminClient();
+
+  const { error } = await admin
+    .from("tournament_entrants")
+    .update({ startgg_entrant_id: String(challongeParticipantId) })
+    .eq("id", entrantId);
+
+  if (error) {
+    console.error("[setEntrantChallongeId]", error);
+    throw new Error(`Failed to save Challonge participant id: ${error.message}`);
+  }
+}
+
+export type ChallongeIdSyncResult = {
+  updated: number;
+  unmatched_challonge: string[];
+  unmatched_local: string[];
+  errors: string[];
+};
+
+export async function syncEntrantIdsFromChallonge(
+  tournamentId: string,
+  challongeId: string
+): Promise<ChallongeIdSyncResult> {
+  const result: ChallongeIdSyncResult = {
+    updated: 0,
+    unmatched_challonge: [],
+    unmatched_local: [],
+    errors: [],
+  };
+
+  const [challongeParticipants, localEntrants] = await Promise.all([
+    getChallongeParticipants(challongeId),
+    listEntrants(tournamentId),
+  ]);
+
+  const localByName = new Map<string, Entrant[]>();
+  for (const entrant of localEntrants) {
+    const name = entrant.players?.display_name?.trim().toLowerCase();
+    if (!name) continue;
+    const list = localByName.get(name) ?? [];
+    list.push(entrant);
+    localByName.set(name, list);
+  }
+
+  const matchedLocalIds = new Set<string>();
+
+  for (const participant of challongeParticipants) {
+    const name = participant.name?.trim().toLowerCase();
+    if (!name) {
+      result.unmatched_challonge.push(
+        participant.name || `(id ${participant.id})`
+      );
+      continue;
+    }
+
+    const candidates = localByName.get(name) ?? [];
+    const entrant =
+      candidates.find((e) => !matchedLocalIds.has(e.id)) ?? null;
+
+    if (!entrant) {
+      result.unmatched_challonge.push(participant.name);
+      continue;
+    }
+
+    matchedLocalIds.add(entrant.id);
+    const challongeIdStr = String(participant.id);
+    if (entrant.startgg_entrant_id === challongeIdStr) {
+      continue;
+    }
+
+    try {
+      await setEntrantChallongeId(entrant.id, challongeIdStr);
+      result.updated++;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result.errors.push(`${participant.name}: ${message}`);
+    }
+  }
+
+  for (const entrant of localEntrants) {
+    if (matchedLocalIds.has(entrant.id)) continue;
+    const name = entrant.players?.display_name ?? "Unknown player";
+    result.unmatched_local.push(name);
+  }
+
+  return result;
 }
 
 export { findPlayerByDisplayName, findPlayerByEmail, createPlayer };
