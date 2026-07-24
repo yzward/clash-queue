@@ -2,11 +2,16 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
+import { PreflightCard } from "@/components/preflight-card";
 import { requireTO } from "@/lib/auth/require-to";
 import {
   getTournamentDetail,
   type TournamentDetail,
 } from "@/lib/data/tournament-detail";
+import {
+  runPreflightChecks,
+  type PreflightResult,
+} from "@/lib/preflight/checks";
 import { createClient } from "@/lib/supabase/server";
 import { formatNZDate } from "@/lib/utils/dates";
 import { cn } from "@/lib/utils";
@@ -113,9 +118,17 @@ function StatCard({
   );
 }
 
-function OverviewTab({ tournament }: { tournament: TournamentDetail }) {
+function OverviewTab({
+  tournament,
+  preflight,
+}: {
+  tournament: TournamentDetail;
+  preflight: PreflightResult | null;
+}) {
   const isLive =
     tournament.status === "active" || tournament.status === "in_progress";
+  const isPending = tournament.status === "pending";
+  const isCompleted = tournament.status === "completed";
 
   return (
     <div className="space-y-4">
@@ -162,7 +175,13 @@ function OverviewTab({ tournament }: { tournament: TournamentDetail }) {
             Live match management coming soon
           </p>
         </div>
-      ) : (
+      ) : null}
+
+      {isPending && preflight ? (
+        <PreflightCard tournamentId={tournament.id} initial={preflight} />
+      ) : null}
+
+      {isCompleted ? (
         <div
           className="rounded-[10px] px-4 py-5"
           style={{
@@ -170,12 +189,13 @@ function OverviewTab({ tournament }: { tournament: TournamentDetail }) {
             border: "1px solid rgba(255,255,255,0.06)",
           }}
         >
-          <p className="text-sm font-medium text-white">Pre-flight checklist</p>
+          <p className="text-sm font-medium text-white">Tournament completed</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Coming next — readiness checks before you can start this tournament.
+            {tournament.matchCount} match
+            {tournament.matchCount === 1 ? "" : "es"} played
           </p>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -214,7 +234,11 @@ export default async function TournamentDetailPage({
   const { tab: rawTab } = await searchParams;
   const activeTab = resolveTab(rawTab);
 
-  const tournament = await getTournamentDetail(id);
+  const [tournament, preflight] = await Promise.all([
+    getTournamentDetail(id),
+    runPreflightChecks(id),
+  ]);
+
   if (!tournament) {
     notFound();
   }
@@ -296,7 +320,10 @@ export default async function TournamentDetailPage({
 
       <div className="mt-6">
         {activeTab === "overview" ? (
-          <OverviewTab tournament={tournament} />
+          <OverviewTab
+            tournament={tournament}
+            preflight={tournament.status === "pending" ? preflight : null}
+          />
         ) : (
           <PlaceholderTab
             name={TABS.find((tab) => tab.id === activeTab)?.label ?? "Tab"}
