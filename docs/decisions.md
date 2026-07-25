@@ -103,3 +103,25 @@ The point of this doc is to prevent relitigating settled questions. If a decisio
 **Rule of thumb captured in Cursor rules:** any new Vercel project touching Supabase must be pinned to `syd1` at creation.
 
 ---
+
+## 2026-07-24 — ABO runs on CSP by default
+
+**Decision:** Auckland Beyblade Open (5 September 2026) runs on CSP, not Clash Queue. Clash Queue development continues in parallel targeting Aotearoa Beyblade Nationals (November 2026) as its first live event.
+
+**Why:** Realistic scope estimate for Clash Queue to reach event-day feature parity is 2-3 weeks of focused work. That leaves no buffer against ABO. Forcing Clash Queue into ABO means either rushing bugs into a live event or abandoning it mid-build when the deadline forces attention back to CSP. Neither is good. Nationals gives Clash Queue 4 months of build + test time before its first real event.
+
+**Reconsider only if:** Clash Queue reaches full event-day feature parity (including tablet scoring, matches, results reporting) at least 2 weeks before ABO AND passes a smaller casual-event end-to-end test.
+
+---
+
+## 2026-07-24 — Pivot rules for potential ABO switch
+
+If Clash Queue ends up being considered as ABO's platform:
+
+1. **Cutoff: 22 August 2026.** If Clash Queue isn't fully working end-to-end (setup + Challonge + tablet scoring + match reporting + results) by 2 weeks before ABO, the decision is locked: ABO runs on CSP.
+
+2. **Test event first, no exceptions.** Even if Clash Queue is ready by the cutoff, run a smaller casual event (or a controlled internal test with committee members) end-to-end on it first. If anything material surfaces, ABO stays on CSP.
+
+**Why:** These rules exist so the pivot decision isn't made under time pressure at the wrong moment. Both rules are guardrails to prevent late-August enthusiasm from overriding better judgement.
+
+---
