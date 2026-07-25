@@ -1,11 +1,12 @@
 "use client";
 
-import { ExternalLink, Loader2 } from "lucide-react";
-import { useEffect, useState, useTransition } from "react";
+import { AlertTriangle, ExternalLink, Loader2 } from "lucide-react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import {
   linkChallongeAction,
+  setTabletPinAction,
   unlinkChallongeAction,
   verifyChallongeLinkAction,
   type ChallongePreview,
@@ -25,7 +26,11 @@ type SettingsTournament = {
   id: string;
   name: string;
   challonge_id: string | null;
+  /** True when a PIN is stored — never pass the raw digits into this UI. */
+  tabletPinSet: boolean;
 };
+
+const PIN_RE = /^[0-9]{4}$/;
 
 const STARTED_BRACKET_STATES = new Set([
   "underway",
@@ -57,6 +62,7 @@ export function SettingsTab({
   tournament: SettingsTournament;
 }) {
   const [linkedId, setLinkedId] = useState(tournament.challonge_id);
+  const [pinSet, setPinSet] = useState(tournament.tabletPinSet);
   const [input, setInput] = useState("");
   const [preview, setPreview] = useState<ChallongePreview | null>(null);
   const [verifiedInput, setVerifiedInput] = useState<string | null>(null);
@@ -67,12 +73,30 @@ export function SettingsTab({
     entrants_with_ids: number;
     matches_with_ids: number;
   } | null>(null);
+  const [pinDialogOpen, setPinDialogOpen] = useState(false);
+  const [clearPinOpen, setClearPinOpen] = useState(false);
+  const [pinDraft, setPinDraft] = useState("");
+  const [pinError, setPinError] = useState<string | null>(null);
+  const pinInputRef = useRef<HTMLInputElement>(null);
   const [pending, startTransition] = useTransition();
   const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     setLinkedId(tournament.challonge_id);
   }, [tournament.challonge_id]);
+
+  useEffect(() => {
+    setPinSet(tournament.tabletPinSet);
+  }, [tournament.tabletPinSet]);
+
+  useEffect(() => {
+    if (pinDialogOpen) {
+      setPinDraft("");
+      setPinError(null);
+      const t = window.setTimeout(() => pinInputRef.current?.focus(), 50);
+      return () => window.clearTimeout(t);
+    }
+  }, [pinDialogOpen]);
 
   const isLinked = Boolean(linkedId);
   const canLink =
@@ -155,6 +179,44 @@ export function SettingsTab({
 
   const startedWarning =
     preview && STARTED_BRACKET_STATES.has(preview.state);
+
+  const pinValid = PIN_RE.test(pinDraft);
+
+  function savePin() {
+    if (!pinValid) {
+      setPinError("Enter exactly 4 digits.");
+      return;
+    }
+    setPinError(null);
+    startTransition(async () => {
+      const result = await setTabletPinAction(tournament.id, pinDraft);
+      if (!result.ok) {
+        if (result.error === "invalid_pin_format") {
+          setPinError("Enter exactly 4 digits.");
+        } else {
+          toast.error(result.error);
+        }
+        return;
+      }
+      setPinSet(true);
+      setPinDialogOpen(false);
+      setPinDraft("");
+      toast.success(pinSet ? "Tablet PIN updated" : "Tablet PIN set");
+    });
+  }
+
+  function clearPin() {
+    startTransition(async () => {
+      const result = await setTabletPinAction(tournament.id, null);
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      setPinSet(false);
+      setClearPinOpen(false);
+      toast.success("Tablet PIN cleared");
+    });
+  }
 
   return (
     <div className="space-y-4">
@@ -318,6 +380,71 @@ export function SettingsTab({
         )}
       </div>
 
+      <div
+        className="rounded-[10px] p-4"
+        style={{
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <h3 className="text-sm font-medium text-white">Tablet PIN</h3>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Set a 4-digit PIN that refs enter on tablets before scoring. Tablets
+          remember the PIN for 12 hours.
+        </p>
+
+        {pinSet ? (
+          <div className="mt-3 space-y-3">
+            <p className="font-mono text-[12px] text-muted-foreground">
+              PIN: •••• (set)
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-white"
+                onClick={() => setPinDialogOpen(true)}
+                disabled={pending}
+              >
+                Change PIN
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                onClick={() => setClearPinOpen(true)}
+                disabled={pending}
+              >
+                Clear PIN
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 space-y-3">
+            <p
+              className="flex items-start gap-2 text-[12px]"
+              style={{ color: "#fbbf24" }}
+            >
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                No PIN set — anyone with a tablet URL can score
+              </span>
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              className="bg-[#a78bfa] text-[#0a0a12] hover:bg-[#a78bfa]/90"
+              onClick={() => setPinDialogOpen(true)}
+              disabled={pending}
+            >
+              Set PIN
+            </Button>
+          </div>
+        )}
+      </div>
+
       <Dialog open={unlinkOpen} onOpenChange={setUnlinkOpen}>
         <DialogContent>
           <DialogHeader>
@@ -345,6 +472,123 @@ export function SettingsTab({
               disabled={pending}
             >
               {pending ? "Unlinking…" : "Unlink anyway"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pinDialogOpen}
+        onOpenChange={(open) => {
+          if (pending) return;
+          setPinDialogOpen(open);
+        }}
+      >
+        <DialogContent className="sm:max-w-md" showCloseButton={!pending}>
+          <DialogHeader>
+            <DialogTitle>
+              {pinSet ? "Change tablet PIN" : "Set tablet PIN"}
+            </DialogTitle>
+            <DialogDescription className="text-left text-[12px] text-muted-foreground">
+              This PIN will be required on all tablets for this tournament.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <label
+              htmlFor="tablet-pin-input"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              4-digit PIN
+            </label>
+            <Input
+              ref={pinInputRef}
+              id="tablet-pin-input"
+              type="text"
+              inputMode="numeric"
+              autoComplete="off"
+              maxLength={4}
+              pattern="[0-9]{4}"
+              value={pinDraft}
+              disabled={pending}
+              placeholder="••••"
+              className="font-mono tracking-[0.3em]"
+              onChange={(event) => {
+                const next = event.target.value.replace(/\D/g, "").slice(0, 4);
+                setPinDraft(next);
+                setPinError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && pinValid && !pending) {
+                  event.preventDefault();
+                  savePin();
+                }
+              }}
+            />
+            {pinError ? (
+              <p className="text-sm text-destructive">{pinError}</p>
+            ) : null}
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={pending}
+              onClick={() => setPinDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={pending || !pinValid}
+              className="bg-[#a78bfa] text-[#0a0a12] hover:bg-[#a78bfa]/90"
+              onClick={() => savePin()}
+            >
+              {pending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : null}
+              Save PIN
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={clearPinOpen}
+        onOpenChange={(open) => {
+          if (pending) return;
+          setClearPinOpen(open);
+        }}
+      >
+        <DialogContent className="sm:max-w-md" showCloseButton={!pending}>
+          <DialogHeader>
+            <DialogTitle>Clear tablet PIN?</DialogTitle>
+            <DialogDescription className="text-left text-[12px] leading-relaxed text-muted-foreground">
+              Without a PIN, anyone with a tablet URL can score matches for
+              this tournament. This includes if a URL is shared or shown on
+              stream. Are you sure?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={pending}
+              onClick={() => setClearPinOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={pending}
+              onClick={() => clearPin()}
+            >
+              {pending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : null}
+              Clear PIN
             </Button>
           </DialogFooter>
         </DialogContent>

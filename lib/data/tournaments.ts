@@ -245,3 +245,50 @@ export async function startTournament(
     },
   };
 }
+
+const TABLET_PIN_RE = /^[0-9]{4}$/;
+
+export class InvalidTabletPinError extends Error {
+  readonly code = "invalid_pin_format" as const;
+
+  constructor(message = "invalid_pin_format") {
+    super(message);
+    this.name = "InvalidTabletPinError";
+  }
+}
+
+/**
+ * Set or clear tournaments.tablet_pin.
+ *
+ * Security: PIN is stored plaintext — courtesy barrier against accidental URL
+ * sharing, not auth-grade. Do not log the PIN. Response omits the PIN value.
+ */
+export async function setTournamentTabletPin(
+  tournamentId: string,
+  pin: string | null
+): Promise<{ id: string; name: string }> {
+  if (pin !== null && !TABLET_PIN_RE.test(pin)) {
+    throw new InvalidTabletPinError();
+  }
+
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("tournaments")
+    .update({ tablet_pin: pin })
+    .eq("id", tournamentId)
+    .is("deleted_at", null)
+    .select("id, name")
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to update tablet PIN: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error("Tournament not found");
+  }
+
+  return {
+    id: String(data.id),
+    name: String(data.name),
+  };
+}

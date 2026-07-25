@@ -6,6 +6,8 @@ export type TournamentDetail = {
   status: string;
   held_at: string | null;
   challonge_id: string | null;
+  /** Presence only for TO UI — never render the digits. */
+  tablet_pin: string | null;
   bracket_engine_id: string | null;
   is_ranking_tournament: boolean | null;
   stage1_format: string | null;
@@ -31,7 +33,7 @@ export async function getTournamentDetail(
       admin
         .from("tournaments")
         .select(
-          "id, name, status, held_at, challonge_id, bracket_engine_id, is_ranking_tournament, stage1_format, format, capacity, deleted_at"
+          "id, name, status, held_at, challonge_id, tablet_pin, bracket_engine_id, is_ranking_tournament, stage1_format, format, capacity, deleted_at"
         )
         .eq("id", id)
         .maybeSingle(),
@@ -70,6 +72,7 @@ export async function getTournamentDetail(
     status: tournament.status as string,
     held_at: (tournament.held_at as string | null) ?? null,
     challonge_id: (tournament.challonge_id as string | null) ?? null,
+    tablet_pin: (tournament.tablet_pin as string | null) ?? null,
     bracket_engine_id: (tournament.bracket_engine_id as string | null) ?? null,
     is_ranking_tournament:
       (tournament.is_ranking_tournament as boolean | null) ?? null,

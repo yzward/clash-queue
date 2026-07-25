@@ -435,6 +435,7 @@ export default async function TournamentDetailPage({
               id: tournament.id,
               name: tournament.name,
               challonge_id: tournament.challonge_id,
+              tabletPinSet: Boolean(tournament.tablet_pin),
             }}
           />
         ) : (

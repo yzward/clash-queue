@@ -62,7 +62,9 @@ import {
 import {
   clearTournamentChallongeReferences,
   countChallongeLinkedData,
+  InvalidTabletPinError,
   setTournamentChallongeId,
+  setTournamentTabletPin,
   startTournament,
   type StartedTournament,
   type TournamentChallongeRow,
@@ -1008,6 +1010,38 @@ export async function verifyChallongeLinkAction(
       matchCount: result.tournament.matches_count,
     },
   };
+}
+
+export type SetTabletPinActionResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+/**
+ * Set or clear the tournament tablet PIN.
+ * Does not return or log the PIN value.
+ */
+export async function setTabletPinAction(
+  tournamentId: string,
+  pin: string | null
+): Promise<SetTabletPinActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    await setTournamentTabletPin(tournamentId, pin);
+    revalidatePath(`/t/${tournamentId}`);
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof InvalidTabletPinError) {
+      return { ok: false, error: "invalid_pin_format" };
+    }
+    console.error("[setTabletPinAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to update tablet PIN";
+    return { ok: false, error: message };
+  }
 }
 
 export async function linkChallongeAction(
