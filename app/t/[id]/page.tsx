@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
+import { BracketTab } from "@/components/bracket-tab";
 import { CourtsTab } from "@/components/courts-tab";
 import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
@@ -370,6 +371,14 @@ export default async function TournamentDetailPage({
             tournament={tournament}
             initialCourts={courtStatuses}
             initialMatches={matchesWithContext}
+          />
+        ) : activeTab === "bracket" ? (
+          <BracketTab
+            tournament={{
+              id: tournament.id,
+              name: tournament.name,
+              challonge_id: tournament.challonge_id,
+            }}
           />
         ) : activeTab === "settings" ? (
           <SettingsTab

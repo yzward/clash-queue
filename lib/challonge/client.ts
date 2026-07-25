@@ -94,6 +94,33 @@ export const CHALLONGE_PUSH_BLOCKED_STATES = new Set([
 ]);
 
 /**
+ * Public page + iframe module URLs for a stored Challonge identifier.
+ * Community IDs (`org-slug`, from parseChallongeIdentifier) open on the org subdomain;
+ * the embed always uses challonge.com/{id}/module (supports both standard and org-composite IDs).
+ */
+export function getChallongeViewerUrls(challongeId: string): {
+  publicUrl: string;
+  embedUrl: string;
+} {
+  const id = challongeId.trim();
+  const dash = id.indexOf("-");
+  if (dash > 0) {
+    const subdomain = id.slice(0, dash);
+    const slug = id.slice(dash + 1);
+    if (subdomain && slug) {
+      return {
+        publicUrl: `https://${subdomain}.challonge.com/${slug}`,
+        embedUrl: `https://challonge.com/${id}/module`,
+      };
+    }
+  }
+  return {
+    publicUrl: `https://challonge.com/${id}`,
+    embedUrl: `https://challonge.com/${id}/module`,
+  };
+}
+
+/**
  * Extract a Challonge tournament slug/ID from a URL, subdomain URL, slug, or numeric ID.
  * Subdomain URLs (community.challonge.com/slug) become `community-slug`.
  */
