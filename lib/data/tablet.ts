@@ -20,10 +20,60 @@ export type TabletCourt = {
 
 export type TabletRef = AvailableRef;
 
+export type TabletRefRole = "Admin" | "Ops" | "Referee" | "Organiser";
+
+export type TabletRefWithRole = {
+  id: string;
+  display_name: string;
+  role: TabletRefRole;
+};
+
 export type TabletMatchPlayer = {
   player_id: string;
   display_name: string;
 };
+
+export type CourtTabletContextOk = {
+  ok: true;
+  court: { id: string; name: string; current_match_id: string | null };
+  tournament: {
+    id: string;
+    name: string;
+    status: string;
+    tablet_pin_set: boolean;
+  };
+  currentMatch: TabletMatchContext | null;
+};
+
+export type CourtTabletContextErr = {
+  ok: false;
+  error: "court_not_found" | "tournament_not_active" | "invalid_court_id";
+};
+
+export type CourtTabletContextResult =
+  | CourtTabletContextOk
+  | CourtTabletContextErr;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const REF_ROLE_PRIORITY: TabletRefRole[] = [
+  "Admin",
+  "Ops",
+  "Organiser",
+  "Referee",
+];
+
+function pickPrimaryRole(roles: string[]): TabletRefRole {
+  for (const preferred of REF_ROLE_PRIORITY) {
+    if (roles.includes(preferred)) return preferred;
+  }
+  return "Referee";
+}
+
+export function isCourtUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
 
 export type TabletMatchContext = {
   match: {
@@ -202,6 +252,194 @@ export async function listRefsForTablet(
   tournamentId: string
 ): Promise<TabletRef[]> {
   return listAvailableRefs(tournamentId);
+}
+
+/**
+ * Refs with a primary role badge for the court kiosk picker.
+ * Prefer Admin → Ops → Organiser → Referee when a player has multiple roles.
+ */
+export async function listRefsForTabletWithRoles(
+  _tournamentId: string
+): Promise<TabletRefWithRole[]> {
+  const admin = createAdminClient();
+  const roleNames = [...REF_ROLE_PRIORITY];
+
+  const { data: roles, error: rolesError } = await admin
+    .from("roles")
+    .select("id, name")
+    .in("name", roleNames);
+
+  if (rolesError) {
+    console.error("[tablet:listRefsWithRoles] roles", rolesError);
+    throw new Error(`Failed to load roles: ${rolesError.message}`);
+  }
+
+  const roleIdToName = new Map<string, TabletRefRole>();
+  for (const row of roles ?? []) {
+    const name = String(row.name);
+    if (
+      name === "Admin" ||
+      name === "Ops" ||
+      name === "Referee" ||
+      name === "Organiser"
+    ) {
+      roleIdToName.set(String(row.id), name);
+    }
+  }
+  if (roleIdToName.size === 0) return [];
+
+  const { data: links, error: linksError } = await admin
+    .from("user_roles")
+    .select("player_id, role_id")
+    .in("role_id", [...roleIdToName.keys()]);
+
+  if (linksError) {
+    console.error("[tablet:listRefsWithRoles] links", linksError);
+    throw new Error(`Failed to load ref roles: ${linksError.message}`);
+  }
+
+  const rolesByPlayer = new Map<string, string[]>();
+  for (const link of links ?? []) {
+    const playerId = link.player_id as string | null;
+    const roleId = link.role_id as string | null;
+    if (!playerId || !roleId) continue;
+    const roleName = roleIdToName.get(roleId);
+    if (!roleName) continue;
+    const list = rolesByPlayer.get(playerId) ?? [];
+    list.push(roleName);
+    rolesByPlayer.set(playerId, list);
+  }
+
+  const playerIds = [...rolesByPlayer.keys()];
+  if (playerIds.length === 0) return [];
+
+  const { data: players, error: playersError } = await admin
+    .from("players")
+    .select("id, display_name")
+    .in("id", playerIds)
+    .is("deleted_at", null)
+    .order("display_name", { ascending: true });
+
+  if (playersError) {
+    console.error("[tablet:listRefsWithRoles] players", playersError);
+    throw new Error(`Failed to load refs: ${playersError.message}`);
+  }
+
+  return (players ?? []).map((p) => {
+    const id = String(p.id);
+    return {
+      id,
+      display_name: String(p.display_name ?? ""),
+      role: pickPrimaryRole(rolesByPlayer.get(id) ?? []),
+    };
+  });
+}
+
+/**
+ * Court kiosk boot context. Never includes tournament.tablet_pin.
+ */
+export async function getTabletContext(
+  courtId: string
+): Promise<CourtTabletContextResult> {
+  if (!isCourtUuid(courtId)) {
+    return { ok: false, error: "invalid_court_id" };
+  }
+
+  const admin = createAdminClient();
+
+  const { data: court, error: courtError } = await admin
+    .from("courts")
+    .select("id, name, current_match_id, tournament_id")
+    .eq("id", courtId)
+    .maybeSingle();
+
+  if (courtError) {
+    console.error("[tablet:getTabletContext] court", courtError);
+    throw new Error(`Failed to load court: ${courtError.message}`);
+  }
+  if (!court || !court.tournament_id) {
+    return { ok: false, error: "court_not_found" };
+  }
+
+  const { data: tournament, error: tournamentError } = await admin
+    .from("tournaments")
+    .select("id, name, status, tablet_pin, deleted_at")
+    .eq("id", court.tournament_id)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (tournamentError) {
+    console.error("[tablet:getTabletContext] tournament", tournamentError);
+    throw new Error(`Failed to load tournament: ${tournamentError.message}`);
+  }
+  if (!tournament) {
+    return { ok: false, error: "court_not_found" };
+  }
+
+  const status = String(tournament.status ?? "");
+  if (status === "completed") {
+    return { ok: false, error: "court_not_found" };
+  }
+  if (status !== "active" && status !== "in_progress") {
+    return { ok: false, error: "tournament_not_active" };
+  }
+
+  const pin = tournament.tablet_pin as string | null;
+  const currentMatch = await getCurrentMatchForCourt(String(court.id));
+
+  return {
+    ok: true,
+    court: {
+      id: String(court.id),
+      name: String(court.name ?? "Court"),
+      current_match_id: (court.current_match_id as string | null) ?? null,
+    },
+    tournament: {
+      id: String(tournament.id),
+      name: String(tournament.name ?? "Tournament"),
+      status,
+      tablet_pin_set: Boolean(pin && /^[0-9]{4}$/.test(pin)),
+    },
+    currentMatch,
+  };
+}
+
+/**
+ * Server-side PIN check. Never logs or returns the stored PIN.
+ */
+export async function verifyTabletPin(
+  tournamentId: string,
+  submittedPin: string
+): Promise<{ ok: true } | { ok: false }> {
+  if (!/^[0-9]{4}$/.test(submittedPin)) {
+    return { ok: false };
+  }
+
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("tournaments")
+    .select("tablet_pin, status, deleted_at")
+    .eq("id", tournamentId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[tablet:verifyPin]", error);
+    throw new Error("Failed to verify PIN");
+  }
+  if (!data) return { ok: false };
+
+  const status = String(data.status ?? "");
+  if (status !== "active" && status !== "in_progress") {
+    return { ok: false };
+  }
+
+  const stored = data.tablet_pin as string | null;
+  if (!stored || stored !== submittedPin) {
+    return { ok: false };
+  }
+
+  return { ok: true };
 }
 
 export async function getCurrentMatchForCourt(

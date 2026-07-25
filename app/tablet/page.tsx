@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 
 import {
-  getTabletContextAction,
+  validateTabletBootAction,
   listActiveTournamentsAction,
   listCourtsForTournamentAction,
   listRefsForTabletAction,
@@ -279,7 +279,7 @@ export default function TabletPage() {
       const courtId = qCourt || storedCourt;
       const refId = qRef || storedRef;
 
-      const result = await getTabletContextAction({
+      const result = await validateTabletBootAction({
         tournamentId,
         courtId,
         refId,
