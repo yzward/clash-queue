@@ -63,6 +63,11 @@ Clash Queue is a tournament management platform for TOs running Clash League NZ 
 - Group stage settings live under `group_stage_options` — `group_size` and `participant_count_to_advance_per_group`.
 - Never re-introduce v1 URL patterns (`api_key` in query string). If a legacy pattern shows up in a prompt, that's a mistake — flag it.
 - Never mask Challonge errors with silent success. Every Challonge call site must handle failures explicitly and surface a specific error, not a generic 500.
+- Match participant slots are nested under `relationships.player1.data.id` and `relationships.player2.data.id` (JSON:API relationships), not flat `player1_id` / `player2_id` fields. Slot can be null for byes or unresolved future matches.
+- Match round is `attributes.round` — integer, negative values indicate losers bracket.
+- Match state values: `pending` (not open yet), `open` (playable), `complete` (played).
+- Match scores are in `attributes.scores` as a formatted string like `"2 - 0"` — NOT v1's comma-separated `scores_csv`. Parse accordingly.
+- Prerequisite match relationships are not exposed on v2.1 MatchOutput. Use round + state to reason about dependency order.
 
 ## Design system
 
