@@ -1,3 +1,4 @@
+import { runPreflightChecks } from "@/lib/preflight/checks";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type DashboardTournament = {
@@ -147,4 +148,100 @@ export async function clearTournamentChallongeReferences(
       `Failed to clear match Challonge ids: ${matchesResult.error.message}`
     );
   }
+}
+
+export type StartedTournament = {
+  id: string;
+  name: string;
+  status: string;
+  started_at: string | null;
+  started_by: string | null;
+};
+
+export type StartTournamentResult =
+  | { ok: true; tournament: StartedTournament }
+  | { ok: false; error: string; failing_checks?: string[] };
+
+/**
+ * Local lifecycle: pending → active.
+ * Distinct from Challonge startTournament() in lib/challonge/client.ts.
+ * Uses tournaments.started_at / started_by for audit.
+ */
+export async function startTournament(
+  tournamentId: string,
+  actorPlayerId: string
+): Promise<StartTournamentResult> {
+  const admin = createAdminClient();
+
+  const { data: tournament, error } = await admin
+    .from("tournaments")
+    .select("id, name, status, deleted_at")
+    .eq("id", tournamentId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to load tournament: ${error.message}`);
+  }
+  if (!tournament) {
+    return { ok: false, error: "Tournament not found" };
+  }
+
+  const status = String(tournament.status ?? "");
+  if (status === "active" || status === "in_progress") {
+    return { ok: false, error: "Tournament is already active" };
+  }
+  if (status === "completed") {
+    return { ok: false, error: "Tournament is completed, cannot start" };
+  }
+  if (status !== "pending") {
+    return {
+      ok: false,
+      error: `Cannot start tournament from status '${status}'`,
+    };
+  }
+
+  const preflight = await runPreflightChecks(tournamentId);
+  const failingRed = preflight.checks.filter(
+    (c) => c.severity === "red" && c.status === "fail"
+  );
+  if (failingRed.length > 0) {
+    return {
+      ok: false,
+      error: "preflight_failed",
+      failing_checks: failingRed.map((c) => c.title),
+    };
+  }
+
+  const now = new Date().toISOString();
+  const { data: updated, error: updateError } = await admin
+    .from("tournaments")
+    .update({
+      status: "active",
+      started_at: now,
+      started_by: actorPlayerId,
+    })
+    .eq("id", tournamentId)
+    .eq("status", "pending")
+    .is("deleted_at", null)
+    .select("id, name, status, started_at, started_by")
+    .maybeSingle();
+
+  if (updateError) {
+    throw new Error(`Failed to start tournament: ${updateError.message}`);
+  }
+  if (!updated) {
+    return { ok: false, error: "Tournament is already active" };
+  }
+
+  return {
+    ok: true,
+    tournament: {
+      id: String(updated.id),
+      name: String(updated.name),
+      status: String(updated.status),
+      started_at: (updated.started_at as string | null) ?? null,
+      started_by: (updated.started_by as string | null) ?? null,
+    },
+  };
 }

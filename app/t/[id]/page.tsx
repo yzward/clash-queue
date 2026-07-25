@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { AlertTriangle } from "lucide-react";
 import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
@@ -181,28 +182,63 @@ function OverviewTab({
       </div>
 
       {isLive ? (
-        <div
-          className="rounded-[10px] px-4 py-5"
-          style={{
-            background: "rgba(34,197,94,0.05)",
-            border: "1px solid rgba(34,197,94,0.15)",
-            borderTop: "2px solid #22c55e",
-          }}
-        >
-          <p className="text-sm font-medium text-white">Tournament is live</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tournament.matchCount} match
-            {tournament.matchCount === 1 ? "" : "es"}
-          </p>
-          <p className="mt-2 text-xs text-muted-foreground">
-            Live match management coming soon
-          </p>
+        <div className="space-y-3">
+          {preflight?.checks.some(
+            (c) => c.severity === "red" && c.status === "fail"
+          ) ? (
+            <div
+              className="flex gap-2.5 rounded-[10px] px-4 py-3"
+              style={{
+                background: "rgba(251,191,36,0.08)",
+                border: "1px solid rgba(251,191,36,0.25)",
+              }}
+            >
+              <AlertTriangle
+                className="mt-0.5 size-4 shrink-0"
+                style={{ color: "#fbbf24" }}
+              />
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-[#fcd34d]">
+                  Live with failing pre-flight checks
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  This tournament is active but still fails:{" "}
+                  {preflight.checks
+                    .filter(
+                      (c) => c.severity === "red" && c.status === "fail"
+                    )
+                    .map((c) => c.title)
+                    .join(", ")}
+                  . New starts are blocked until checks pass — fix these when
+                  you can.
+                </p>
+              </div>
+            </div>
+          ) : null}
+          <div
+            className="rounded-[10px] px-4 py-5"
+            style={{
+              background: "rgba(34,197,94,0.05)",
+              border: "1px solid rgba(34,197,94,0.15)",
+              borderTop: "2px solid #22c55e",
+            }}
+          >
+            <p className="text-sm font-medium text-white">Tournament is live</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {tournament.matchCount} match
+              {tournament.matchCount === 1 ? "" : "es"}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Live match management coming soon
+            </p>
+          </div>
         </div>
       ) : null}
 
       {isPending && preflight ? (
         <PreflightCard
           tournamentId={tournament.id}
+          tournamentName={tournament.name}
           initial={preflight}
           confirmedPlayers={tournament.entrants.confirmed}
         />
@@ -355,7 +391,13 @@ export default async function TournamentDetailPage({
         {activeTab === "overview" ? (
           <OverviewTab
             tournament={tournament}
-            preflight={tournament.status === "pending" ? preflight : null}
+            preflight={
+              tournament.status === "pending" ||
+              tournament.status === "active" ||
+              tournament.status === "in_progress"
+                ? preflight
+                : null
+            }
           />
         ) : activeTab === "players" ? (
           <PlayersTab

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { AlertTriangle, Check, Loader2, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
@@ -9,6 +10,7 @@ import {
   generateMatchesAction,
   refreshPreflight,
   startAndGenerateMatchesAction,
+  startTournamentAction,
 } from "@/app/t/[id]/actions";
 import { Button } from "@/components/ui/button";
 import {
@@ -338,20 +340,26 @@ function rowBackground(check: PreflightCheck): string {
 
 export function PreflightCard({
   tournamentId,
+  tournamentName,
   initial,
   confirmedPlayers,
 }: {
   tournamentId: string;
+  tournamentName: string;
   initial: PreflightResult;
   confirmedPlayers: number;
 }) {
+  const router = useRouter();
   const [data, setData] = useState(initial);
   const [isPending, startTransition] = useTransition();
+  const [startOpen, setStartOpen] = useState(false);
+  const [starting, startStartingTransition] = useTransition();
 
   const passed = data.checks.filter((c) => c.status === "pass").length;
   const total = data.checks.length;
   const needingAction = total - passed;
   const percent = total === 0 ? 0 : Math.round((passed / total) * 100);
+  const canStart = data.ready_to_start;
 
   const bracketStartedCheck = data.checks.find(
     (c) => c.id === "challonge_bracket_started"
@@ -362,6 +370,24 @@ export function PreflightCard({
     startTransition(async () => {
       const next = await refreshPreflight(tournamentId);
       setData(next);
+    });
+  }
+
+  function confirmStartTournament() {
+    startStartingTransition(async () => {
+      const result = await startTournamentAction(tournamentId);
+      if (!result.ok) {
+        if (result.error === "preflight_failed" && result.failing_checks?.length) {
+          toast.error(`Can't start: ${result.failing_checks.join(", ")}.`);
+        } else {
+          toast.error(result.error);
+        }
+        return;
+      }
+
+      setStartOpen(false);
+      toast.success(`Started ${result.tournament.name}.`);
+      router.refresh();
     });
   }
 
@@ -435,28 +461,68 @@ export function PreflightCard({
         style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
       >
         <p className="text-xs text-muted-foreground">
-          Complete all checks to unlock
+          {canStart ? "Ready to start" : "Complete all checks to unlock"}
         </p>
         <button
           type="button"
-          disabled={!data.ready_to_start}
-          title={data.ready_to_start ? "Coming soon" : undefined}
+          disabled={!canStart}
+          onClick={() => {
+            if (!canStart) return;
+            setStartOpen(true);
+          }}
           className={cn(
             "inline-flex items-center justify-center px-4 py-2 text-sm font-semibold transition-opacity",
-            data.ready_to_start
+            canStart
               ? "bg-[#a78bfa] text-[#0a0a12] hover:opacity-90"
               : "cursor-not-allowed text-[#a78bfa]/50"
           )}
           style={{
             clipPath: LOGO_CLIP,
-            background: data.ready_to_start
-              ? "#a78bfa"
-              : "rgba(167,139,250,0.15)",
+            background: canStart ? "#a78bfa" : "rgba(167,139,250,0.15)",
           }}
         >
           Start tournament →
         </button>
       </div>
+
+      <Dialog
+        open={startOpen}
+        onOpenChange={(open) => {
+          if (starting) return;
+          setStartOpen(open);
+        }}
+      >
+        <DialogContent className="sm:max-w-md" showCloseButton={!starting}>
+          <DialogHeader>
+            <DialogTitle>Start {tournamentName}?</DialogTitle>
+            <DialogDescription className="text-left text-[12px] leading-relaxed text-muted-foreground">
+              Once started, matches can be scored and results reported. You can
+              still edit courts and refs during the tournament.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={starting}
+              onClick={() => setStartOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={starting}
+              className="bg-[#a78bfa] text-[#0a0a12] hover:bg-[#a78bfa]/90"
+              onClick={() => confirmStartTournament()}
+            >
+              {starting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : null}
+              Start tournament
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

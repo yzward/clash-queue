@@ -63,6 +63,8 @@ import {
   clearTournamentChallongeReferences,
   countChallongeLinkedData,
   setTournamentChallongeId,
+  startTournament,
+  type StartedTournament,
   type TournamentChallongeRow,
 } from "@/lib/data/tournaments";
 import {
@@ -126,6 +128,10 @@ export type GenerateMatchesActionResult =
   | { ok: false; error: string };
 
 export type StartAndGenerateMatchesActionResult = StartAndGenerateResult;
+
+export type StartTournamentActionResult =
+  | { ok: true; tournament: StartedTournament }
+  | { ok: false; error: string; failing_checks?: string[] };
 
 export type SyncMatchesActionResult =
   | ({ ok: true } & GenerateMatchesResult)
@@ -643,6 +649,28 @@ async function assertEntrantsSynced(
   }
 
   return { ok: true };
+}
+
+export async function startTournamentAction(
+  tournamentId: string
+): Promise<StartTournamentActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const result = await startTournament(tournamentId, auth.playerId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[startTournamentAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to start tournament";
+    return { ok: false, error: message };
+  }
 }
 
 export async function generateMatchesAction(
