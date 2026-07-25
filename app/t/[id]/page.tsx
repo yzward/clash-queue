@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -6,6 +7,7 @@ import { CourtsTab } from "@/components/courts-tab";
 import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
 import { SettingsTab } from "@/components/settings-tab";
+import { SyncMatchesButton } from "@/components/sync-matches-button";
 import { requireTO } from "@/lib/auth/require-to";
 import { listCourts } from "@/lib/data/courts";
 import { listEntrants } from "@/lib/data/entrants";
@@ -97,11 +99,13 @@ function StatCard({
   value,
   meta,
   sub,
+  action,
 }: {
   label: string;
   value: number | string;
   meta?: string | null;
   sub?: string | null;
+  action?: ReactNode;
 }) {
   return (
     <div
@@ -111,7 +115,10 @@ function StatCard({
         border: "1px solid rgba(255,255,255,0.06)",
       }}
     >
-      <p className="text-xs text-muted-foreground">{label}</p>
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-xs text-muted-foreground">{label}</p>
+        {action}
+      </div>
       <p className="mt-1 text-[22px] font-semibold leading-none text-white">
         {value}
       </p>
@@ -154,6 +161,11 @@ function OverviewTab({
           label="Matches"
           value={tournament.matchCount}
           meta={tournament.matchCount > 0 ? "generated" : "none yet"}
+          action={
+            tournament.challonge_id && tournament.matchCount > 0 ? (
+              <SyncMatchesButton tournamentId={tournament.id} />
+            ) : null
+          }
         />
         <StatCard
           label="Courts"
@@ -183,7 +195,11 @@ function OverviewTab({
       ) : null}
 
       {isPending && preflight ? (
-        <PreflightCard tournamentId={tournament.id} initial={preflight} />
+        <PreflightCard
+          tournamentId={tournament.id}
+          initial={preflight}
+          confirmedPlayers={tournament.entrants.confirmed}
+        />
       ) : null}
 
       {isCompleted ? (

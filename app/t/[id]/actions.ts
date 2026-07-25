@@ -42,7 +42,9 @@ import {
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   generateMatchesFromChallonge,
+  startAndGenerateMatches,
   type GenerateMatchesResult,
+  type StartAndGenerateResult,
 } from "@/lib/data/matches";
 import {
   clearTournamentChallongeReferences,
@@ -107,6 +109,12 @@ export type SyncFromChallongeResult =
   | { ok: false; error: string };
 
 export type GenerateMatchesActionResult =
+  | ({ ok: true } & GenerateMatchesResult)
+  | { ok: false; error: string };
+
+export type StartAndGenerateMatchesActionResult = StartAndGenerateResult;
+
+export type SyncMatchesActionResult =
   | ({ ok: true } & GenerateMatchesResult)
   | { ok: false; error: string };
 
@@ -580,6 +588,35 @@ export async function syncFromChallongeAction(
   }
 }
 
+async function assertEntrantsSynced(
+  tournamentId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const admin = createAdminClient();
+  const { data: entrants, error: entrantsError } = await admin
+    .from("tournament_entrants")
+    .select("id, startgg_entrant_id, entrant_status")
+    .eq("tournament_id", tournamentId)
+    .eq("entrant_status", "confirmed");
+
+  if (entrantsError) {
+    console.error("[assertEntrantsSynced]", entrantsError);
+    return {
+      ok: false,
+      error: `Failed to load entrants: ${entrantsError.message}`,
+    };
+  }
+
+  const unsynced = (entrants ?? []).filter((e) => e.startgg_entrant_id == null);
+  if (unsynced.length > 0) {
+    return {
+      ok: false,
+      error: `Some entrants are not synced to Challonge — run Pull from Challonge first (${unsynced.length} missing)`,
+    };
+  }
+
+  return { ok: true };
+}
+
 export async function generateMatchesAction(
   tournamentId: string
 ): Promise<GenerateMatchesActionResult> {
@@ -604,30 +641,8 @@ export async function generateMatchesAction(
       };
     }
 
-    const admin = createAdminClient();
-    const { data: entrants, error: entrantsError } = await admin
-      .from("tournament_entrants")
-      .select("id, startgg_entrant_id, entrant_status")
-      .eq("tournament_id", tournamentId)
-      .eq("entrant_status", "confirmed");
-
-    if (entrantsError) {
-      console.error("[generateMatchesAction] entrants", entrantsError);
-      return {
-        ok: false,
-        error: `Failed to load entrants: ${entrantsError.message}`,
-      };
-    }
-
-    const unsynced = (entrants ?? []).filter(
-      (e) => e.startgg_entrant_id == null
-    );
-    if (unsynced.length > 0) {
-      return {
-        ok: false,
-        error: `Some entrants are not synced to Challonge — run Pull from Challonge first (${unsynced.length} missing)`,
-      };
-    }
+    const synced = await assertEntrantsSynced(tournamentId);
+    if (!synced.ok) return synced;
 
     const result = await generateMatchesFromChallonge(
       tournamentId,
@@ -640,6 +655,108 @@ export async function generateMatchesAction(
     console.error("[generateMatchesAction]", err);
     const message =
       err instanceof Error ? err.message : "Failed to generate matches";
+    return { ok: false, error: message };
+  }
+}
+
+export async function startAndGenerateMatchesAction(
+  tournamentId: string
+): Promise<StartAndGenerateMatchesActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return {
+      ok: false,
+      phase: "start",
+      error: "Not authorised",
+      started: false,
+    };
+  }
+
+  try {
+    const linked = await loadTournamentChallongeId(tournamentId);
+    if ("error" in linked) {
+      return {
+        ok: false,
+        phase: "start",
+        error: linked.error,
+        started: false,
+      };
+    }
+
+    const synced = await assertEntrantsSynced(tournamentId);
+    if (!synced.ok) {
+      return {
+        ok: false,
+        phase: "start",
+        error: synced.error,
+        started: false,
+      };
+    }
+
+    const result = await startAndGenerateMatches(
+      tournamentId,
+      linked.challongeId,
+      auth.playerId
+    );
+    revalidatePath(`/t/${tournamentId}`);
+    return result;
+  } catch (err) {
+    console.error("[startAndGenerateMatchesAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to start and generate matches";
+    return {
+      ok: false,
+      phase: "start",
+      error: message,
+      started: false,
+    };
+  }
+}
+
+export async function syncMatchesAction(
+  tournamentId: string
+): Promise<SyncMatchesActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const linked = await loadTournamentChallongeId(tournamentId);
+    if ("error" in linked) {
+      return { ok: false, error: linked.error };
+    }
+
+    const admin = createAdminClient();
+    const { count, error: countError } = await admin
+      .from("matches")
+      .select("id", { count: "exact", head: true })
+      .eq("tournament_id", tournamentId);
+
+    if (countError) {
+      console.error("[syncMatchesAction] count", countError);
+      return { ok: false, error: `Failed to check matches: ${countError.message}` };
+    }
+
+    if ((count ?? 0) < 1) {
+      return {
+        ok: false,
+        error:
+          "No local matches yet — use Generate matches first",
+      };
+    }
+
+    const result = await generateMatchesFromChallonge(
+      tournamentId,
+      linked.challongeId,
+      auth.playerId
+    );
+    revalidatePath(`/t/${tournamentId}`);
+    return { ok: true, ...result };
+  } catch (err) {
+    console.error("[syncMatchesAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to sync matches";
     return { ok: false, error: message };
   }
 }

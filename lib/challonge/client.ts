@@ -16,7 +16,7 @@
  * - prerequisite_match_ids_csv is v1-only — absent from v2.1 MatchOutput
  * - URL slug (nl7udlbm) and numeric id both work in /tournaments/{id}.json paths
  *
- * Write shapes (2026-07-25, from Challonge v2.1 OpenAPI / Apidog; live POST
+ * Write shapes (2026-07-25, from Challonge v2.1 OpenAPI / Apidog; live write
  * verification blocked locally because CHALLONGE_API_KEY is Sensitive on Vercel
  * and `vercel env pull` returns an empty placeholder):
  * - POST /tournaments/{id}/participants.json
@@ -24,6 +24,9 @@
  * - POST /tournaments/{id}/participants/bulk_add.json
  *   body: { data: { type: "Participants", attributes: { participants: [{ name, ... }] } } }
  *   max 20 per request
+ * - PUT /tournaments/{id}/change_state.json
+ *   body: { data: { type: "TournamentState", attributes: { state: "start" | "start_group_stage" | ... } } }
+ *   Use start_group_stage when group_stage_enabled; otherwise start.
  */
 
 import type {
@@ -56,6 +59,19 @@ export class ChallongePushError extends Error {
   constructor(message: string, status = 400, body?: unknown) {
     super(message);
     this.name = "ChallongePushError";
+    this.status = status;
+    this.body = body ?? null;
+  }
+}
+
+export class ChallongeStartError extends Error {
+  readonly code = "CHALLONGE_START_ERROR" as const;
+  status: number;
+  body: unknown;
+
+  constructor(message: string, status = 400, body?: unknown) {
+    super(message);
+    this.name = "ChallongeStartError";
     this.status = status;
     this.body = body ?? null;
   }
@@ -462,6 +478,65 @@ export async function getChallongeMatches(
 
   const rows = Array.isArray(doc.data) ? doc.data : doc.data ? [doc.data] : [];
   return rows.map(normaliseMatch);
+}
+
+/**
+ * Start a Challonge bracket via PUT change_state.
+ * Chooses `start_group_stage` when group stages are enabled, else `start`.
+ * Shape verified against Challonge v2.1 OpenAPI TournamentStateInput (2026-07-25).
+ */
+export async function startTournament(
+  challongeId: string
+): Promise<ChallongeTournament> {
+  const current = await getChallongeTournament(challongeId);
+  if (CHALLONGE_STARTED_STATES.has(current.state)) {
+    return current;
+  }
+
+  const transition = current.group_stage_enabled
+    ? "start_group_stage"
+    : "start";
+
+  try {
+    const doc = await challongeRequest<JsonApiDocument>(
+      `/tournaments/${encodeURIComponent(challongeId)}/change_state.json`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          data: {
+            type: "TournamentState",
+            attributes: { state: transition },
+          },
+        }),
+      }
+    );
+
+    if (!doc.data || Array.isArray(doc.data)) {
+      // Some Challonge responses may not echo the full tournament — re-fetch.
+      return getChallongeTournament(challongeId);
+    }
+
+    return normaliseTournament(doc.data);
+  } catch (err) {
+    if (err instanceof ChallongeStartError) throw err;
+    const message = extractStartErrorMessage(err);
+    const status = err instanceof ChallongeError ? err.status : 400;
+    const body = err instanceof ChallongeError ? err.body : undefined;
+    throw new ChallongeStartError(message, status, body);
+  }
+}
+
+function extractStartErrorMessage(err: unknown): string {
+  if (err instanceof ChallongeError) {
+    const doc = err.body as JsonApiDocument | null;
+    const detail =
+      doc?.errors?.[0]?.detail ||
+      doc?.errors?.[0]?.title ||
+      err.message.replace(/^Challonge \d+:\s*/, "");
+    return detail || "Couldn't start Challonge bracket";
+  }
+  if (err instanceof Error) return err.message;
+  return "Couldn't start Challonge bracket";
 }
 
 function flattenPushedParticipant(

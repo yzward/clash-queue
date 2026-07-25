@@ -21,7 +21,13 @@
  *   label in stage. Unique (tournament_id, challonge_match_id) already exists.
  */
 
-import { getChallongeMatches } from "@/lib/challonge/client";
+import {
+  ChallongeStartError,
+  CHALLONGE_STARTED_STATES,
+  getChallongeMatches,
+  getChallongeTournament,
+  startTournament,
+} from "@/lib/challonge/client";
 import type { ChallongeMatch } from "@/lib/challonge/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -66,6 +72,20 @@ export type GenerateMatchesResult = {
   skipped: number;
   errors: GenerateMatchesError[];
 };
+
+export type StartAndGenerateResult =
+  | ({
+      ok: true;
+      started: boolean;
+    } & GenerateMatchesResult)
+  | { ok: false; phase: "start"; error: string; started: false }
+  | {
+      ok: false;
+      phase: "generate";
+      /** True when Challonge start succeeded in this call before generate failed. */
+      started: boolean;
+      generateError: string;
+    };
 
 function mapMatchRow(row: Record<string, unknown>): MatchRow {
   return {
@@ -204,6 +224,57 @@ export async function listMatchesWithPlayers(
     match,
     players: byMatch.get(match.id) ?? [],
   }));
+}
+
+export async function startAndGenerateMatches(
+  tournamentId: string,
+  challongeId: string,
+  actorPlayerId: string
+): Promise<StartAndGenerateResult> {
+  let started = false;
+
+  try {
+    const current = await getChallongeTournament(challongeId);
+    if (!CHALLONGE_STARTED_STATES.has(current.state)) {
+      try {
+        await startTournament(challongeId);
+        started = true;
+      } catch (err) {
+        const message =
+          err instanceof ChallongeStartError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Couldn't start Challonge bracket";
+        console.error("[matches:startAndGenerate] start failed", err);
+        return { ok: false, phase: "start", error: message, started: false };
+      }
+    }
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Couldn't reach Challonge";
+    console.error("[matches:startAndGenerate] fetch state failed", err);
+    return { ok: false, phase: "start", error: message, started: false };
+  }
+
+  try {
+    const result = await generateMatchesFromChallonge(
+      tournamentId,
+      challongeId,
+      actorPlayerId
+    );
+    return { ok: true, started, ...result };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to generate matches";
+    console.error("[matches:startAndGenerate] generate failed", err);
+    return {
+      ok: false,
+      phase: "generate",
+      started,
+      generateError: message,
+    };
+  }
 }
 
 export async function generateMatchesFromChallonge(

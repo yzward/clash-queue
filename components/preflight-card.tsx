@@ -8,8 +8,17 @@ import { toast } from "sonner";
 import {
   generateMatchesAction,
   refreshPreflight,
+  startAndGenerateMatchesAction,
 } from "@/app/t/[id]/actions";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type {
   PreflightCheck,
   PreflightResult,
@@ -94,14 +103,20 @@ function StatusIcon({ check }: { check: PreflightCheck }) {
 function CheckFixButton({
   check,
   tournamentId,
+  confirmedPlayers,
+  needsStartConfirmation,
   onGenerated,
 }: {
   check: PreflightCheck;
   tournamentId: string;
+  confirmedPlayers: number;
+  needsStartConfirmation: boolean;
   onGenerated: () => void;
 }) {
   const action = check.fix_action;
   const [isPending, startTransition] = useTransition();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [progressLabel, setProgressLabel] = useState<string | null>(null);
 
   if (!action || check.status === "pass") return null;
 
@@ -136,43 +151,171 @@ function CheckFixButton({
 
   if ("action" in action) {
     if (action.action === "generate_matches") {
+      function runDirectGenerate() {
+        startTransition(async () => {
+          const result = await generateMatchesAction(tournamentId);
+          if (!result.ok) {
+            toast.error(result.error);
+            return;
+          }
+          if (result.skipped > 0 && result.generated === 0) {
+            toast.success(
+              `No new matches — ${result.skipped} already existed`
+            );
+          } else if (result.skipped > 0) {
+            toast.success(
+              `Generated ${result.generated} matches (${result.skipped} skipped)`
+            );
+          } else {
+            toast.success(`Generated ${result.generated} matches`);
+          }
+          if (result.errors.length > 0) {
+            toast.error(
+              `${result.errors.length} match${result.errors.length === 1 ? "" : "es"} failed to import`
+            );
+          }
+          onGenerated();
+        });
+      }
+
+      function runStartAndGenerate() {
+        setProgressLabel("Starting bracket...");
+        const labelTimer = window.setTimeout(() => {
+          setProgressLabel("Generating matches...");
+        }, 900);
+
+        startTransition(async () => {
+          const result = await startAndGenerateMatchesAction(tournamentId);
+          window.clearTimeout(labelTimer);
+          setProgressLabel(null);
+          setConfirmOpen(false);
+
+          if (!result.ok) {
+            if (result.phase === "start") {
+              toast.error(`Couldn't start bracket: ${result.error}`);
+              return;
+            }
+            if (result.started) {
+              toast.warning(
+                "Bracket started, but match generation failed. Try Sync matches once Challonge is ready."
+              );
+            } else {
+              toast.error(result.generateError);
+            }
+            onGenerated();
+            return;
+          }
+
+          if (result.started) {
+            toast.success(
+              `Started bracket and generated ${result.generated} match${result.generated === 1 ? "" : "es"}.`
+            );
+          } else {
+            toast.success(
+              `Generated ${result.generated} match${result.generated === 1 ? "" : "es"}.`
+            );
+          }
+          if (result.errors.length > 0) {
+            toast.error(
+              `${result.errors.length} match${result.errors.length === 1 ? "" : "es"} failed to import`
+            );
+          }
+          onGenerated();
+        });
+      }
+
       return (
-        <button
-          type="button"
-          className={className}
-          disabled={isPending}
-          onClick={() => {
-            startTransition(async () => {
-              const result = await generateMatchesAction(tournamentId);
-              if (!result.ok) {
-                toast.error(result.error);
+        <>
+          <button
+            type="button"
+            className={className}
+            disabled={isPending}
+            onClick={() => {
+              if (needsStartConfirmation) {
+                setConfirmOpen(true);
                 return;
               }
-              if (result.skipped > 0 && result.generated === 0) {
-                toast.success(
-                  `No new matches — ${result.skipped} already existed`
-                );
-              } else if (result.skipped > 0) {
-                toast.success(
-                  `Generated ${result.generated} matches (${result.skipped} skipped)`
-                );
-              } else {
-                toast.success(`Generated ${result.generated} matches`);
-              }
-              if (result.errors.length > 0) {
-                toast.error(
-                  `${result.errors.length} match${result.errors.length === 1 ? "" : "es"} failed to import`
-                );
-              }
-              onGenerated();
-            });
-          }}
-        >
-          {isPending ? (
-            <Loader2 className="size-3 animate-spin" />
-          ) : null}
-          {action.label}
-        </button>
+              runDirectGenerate();
+            }}
+          >
+            {isPending && !confirmOpen ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : null}
+            {action.label}
+          </button>
+
+          <Dialog
+            open={confirmOpen}
+            onOpenChange={(open) => {
+              if (isPending) return;
+              setConfirmOpen(open);
+            }}
+          >
+            <DialogContent className="sm:max-w-md" showCloseButton={!isPending}>
+              <DialogHeader>
+                <DialogTitle>
+                  Start Challonge bracket and generate matches?
+                </DialogTitle>
+                <DialogDescription className="text-left text-[12px] leading-relaxed text-muted-foreground">
+                  The Challonge bracket for this tournament hasn&apos;t been
+                  started yet. Starting it will:
+                </DialogDescription>
+              </DialogHeader>
+
+              <ul className="list-disc space-y-1.5 pl-5 text-[12px] text-muted-foreground">
+                <li>Lock the participant list (no new players can be added)</li>
+                <li>Freeze the bracket structure</li>
+                <li>Enable match generation</li>
+              </ul>
+
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                This can&apos;t be fully undone without resetting the Challonge
+                bracket, which would wipe any results.
+              </p>
+
+              <div
+                className="rounded-lg px-3 py-2 text-[11px] font-medium"
+                style={{
+                  background: "rgba(251,191,36,0.1)",
+                  border: "1px solid rgba(251,191,36,0.25)",
+                  color: "#fbbf24",
+                }}
+              >
+                You currently have {confirmedPlayers} player
+                {confirmedPlayers === 1 ? "" : "s"} registered.
+              </div>
+
+              {isPending && progressLabel ? (
+                <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {progressLabel}
+                </p>
+              ) : null}
+
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={isPending}
+                  onClick={() => setConfirmOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={isPending}
+                  className="bg-[#a78bfa] text-[#0a0a12] hover:bg-[#a78bfa]/90"
+                  onClick={() => runStartAndGenerate()}
+                >
+                  {isPending ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : null}
+                  Start bracket &amp; generate matches
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </>
       );
     }
 
@@ -196,9 +339,11 @@ function rowBackground(check: PreflightCheck): string {
 export function PreflightCard({
   tournamentId,
   initial,
+  confirmedPlayers,
 }: {
   tournamentId: string;
   initial: PreflightResult;
+  confirmedPlayers: number;
 }) {
   const [data, setData] = useState(initial);
   const [isPending, startTransition] = useTransition();
@@ -207,6 +352,11 @@ export function PreflightCard({
   const total = data.checks.length;
   const needingAction = total - passed;
   const percent = total === 0 ? 0 : Math.round((passed / total) * 100);
+
+  const bracketStartedCheck = data.checks.find(
+    (c) => c.id === "challonge_bracket_started"
+  );
+  const needsStartConfirmation = bracketStartedCheck?.status === "fail";
 
   function handleRefresh() {
     startTransition(async () => {
@@ -272,6 +422,8 @@ export function PreflightCard({
             <CheckFixButton
               check={check}
               tournamentId={tournamentId}
+              confirmedPlayers={confirmedPlayers}
+              needsStartConfirmation={needsStartConfirmation}
               onGenerated={handleRefresh}
             />
           </li>
