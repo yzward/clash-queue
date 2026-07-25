@@ -29,10 +29,18 @@ import {
   CHALLONGE_PUSH_BLOCKED_STATES,
   ChallongePushError,
   getChallongeTournament,
+  getChallongeTournamentSafe,
+  parseChallongeIdentifier,
   pushParticipant,
   pushParticipantsBulk,
 } from "@/lib/challonge/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  clearTournamentChallongeReferences,
+  countChallongeLinkedData,
+  setTournamentChallongeId,
+  type TournamentChallongeRow,
+} from "@/lib/data/tournaments";
 import {
   HumanitixConfigError,
   HumanitixResponseError,
@@ -78,6 +86,40 @@ export type PushToChallongeResult =
 export type SyncFromChallongeResult =
   | ({ ok: true } & ChallongeIdSyncResult)
   | { ok: false; error: string };
+
+export type ChallongePreview = {
+  id: string;
+  name: string;
+  state: string;
+  participantCount: number;
+  matchCount: number;
+};
+
+export type VerifyChallongeLinkResult =
+  | { ok: true; preview: ChallongePreview; parsedId: string }
+  | {
+      ok: false;
+      error: "invalid_format" | "not_found" | "auth" | "network" | "unknown";
+      message?: string;
+      parsedId?: string;
+    };
+
+export type LinkChallongeResult =
+  | { ok: true; tournament: TournamentChallongeRow }
+  | {
+      ok: false;
+      error: string;
+      message?: string;
+    };
+
+export type UnlinkChallongeResult =
+  | { ok: true }
+  | {
+      ok: false;
+      error: "has_challonge_data" | string;
+      message?: string;
+      counts?: { entrants_with_ids: number; matches_with_ids: number };
+    };
 
 export async function refreshPreflight(
   tournamentId: string
@@ -450,5 +492,123 @@ export async function syncFromChallongeAction(
     const message =
       err instanceof Error ? err.message : "Failed to sync from Challonge";
     return { ok: false, error: message };
+  }
+}
+
+export async function verifyChallongeLinkAction(
+  input: string
+): Promise<VerifyChallongeLinkResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unknown", message: "Not authorised" };
+  }
+
+  const parsedId = parseChallongeIdentifier(input);
+  if (!parsedId) {
+    return { ok: false, error: "invalid_format" };
+  }
+
+  const result = await getChallongeTournamentSafe(parsedId);
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.error,
+      message: result.message,
+      parsedId,
+    };
+  }
+
+  return {
+    ok: true,
+    parsedId,
+    preview: {
+      id: result.tournament.id || parsedId,
+      name: result.tournament.name,
+      state: result.tournament.state,
+      participantCount: result.tournament.participants_count,
+      matchCount: result.tournament.matches_count,
+    },
+  };
+}
+
+export async function linkChallongeAction(
+  tournamentId: string,
+  input: string
+): Promise<LinkChallongeResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  const parsedId = parseChallongeIdentifier(input);
+  if (!parsedId) {
+    return {
+      ok: false,
+      error: "invalid_format",
+      message:
+        "That doesn't look like a Challonge URL or slug. Paste the full URL or just the slug (e.g. nl7udlbm).",
+    };
+  }
+
+  const verified = await getChallongeTournamentSafe(parsedId);
+  if (!verified.ok) {
+    return {
+      ok: false,
+      error: verified.error,
+      message: verified.message,
+    };
+  }
+
+  try {
+    const tournament = await setTournamentChallongeId(tournamentId, parsedId);
+    revalidatePath(`/t/${tournamentId}`);
+    return { ok: true, tournament };
+  } catch (err) {
+    console.error("[linkChallongeAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to link Challonge";
+    return { ok: false, error: "unknown", message };
+  }
+}
+
+export async function unlinkChallongeAction(
+  tournamentId: string,
+  opts: { confirmDataLoss?: boolean } = {}
+): Promise<UnlinkChallongeResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const linked = await loadTournamentChallongeId(tournamentId);
+    if ("error" in linked) {
+      return { ok: false, error: linked.error, message: linked.error };
+    }
+
+    const counts = await countChallongeLinkedData(tournamentId);
+    const hasData =
+      counts.entrants_with_ids > 0 || counts.matches_with_ids > 0;
+
+    if (hasData && !opts.confirmDataLoss) {
+      return {
+        ok: false,
+        error: "has_challonge_data",
+        counts,
+      };
+    }
+
+    if (hasData && opts.confirmDataLoss) {
+      await clearTournamentChallongeReferences(tournamentId);
+    }
+
+    await setTournamentChallongeId(tournamentId, null);
+    revalidatePath(`/t/${tournamentId}`);
+    return { ok: true };
+  } catch (err) {
+    console.error("[unlinkChallongeAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to unlink Challonge";
+    return { ok: false, error: "unknown", message };
   }
 }

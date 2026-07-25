@@ -65,6 +65,125 @@ export const CHALLONGE_PUSH_BLOCKED_STATES = new Set([
   "complete",
 ]);
 
+/**
+ * Extract a Challonge tournament slug/ID from a URL, subdomain URL, slug, or numeric ID.
+ * Subdomain URLs (community.challonge.com/slug) become `community-slug`.
+ */
+export function parseChallongeIdentifier(input: string): string | null {
+  let raw = input.trim();
+  if (!raw) return null;
+
+  raw = raw.replace(/\/+$/, "").replace(/\.json$/i, "");
+
+  if (/challonge\.com/i.test(raw)) {
+    try {
+      const urlStr = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      const url = new URL(urlStr);
+      const host = url.hostname.toLowerCase();
+      const isChallongeHost =
+        host === "challonge.com" ||
+        host === "www.challonge.com" ||
+        host.endsWith(".challonge.com");
+      if (!isChallongeHost) return null;
+
+      const parts = url.pathname
+        .replace(/^\/+|\/+$/g, "")
+        .split("/")
+        .filter(Boolean);
+      const hostnameParts = host.split(".");
+      const subdomain =
+        hostnameParts.length > 2 ? hostnameParts[0] : null;
+
+      if (subdomain && subdomain !== "www" && subdomain !== "challonge") {
+        const slug = parts[0];
+        if (!slug || !isValidChallongeToken(slug)) return null;
+        return `${subdomain}-${slug}`;
+      }
+
+      if (
+        parts.length > 1 &&
+        (host === "challonge.com" || host === "www.challonge.com")
+      ) {
+        if (
+          !isValidChallongeToken(parts[0]) ||
+          !isValidChallongeToken(parts[1])
+        ) {
+          return null;
+        }
+        return `${parts[0]}-${parts[1]}`;
+      }
+
+      if (!parts[0] || !isValidChallongeToken(parts[0])) return null;
+      return parts[0];
+    } catch {
+      return null;
+    }
+  }
+
+  if (!isValidChallongeToken(raw)) return null;
+  return raw;
+}
+
+function isValidChallongeToken(value: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(value);
+}
+
+export type ChallongeSafeResult =
+  | { ok: true; tournament: ChallongeTournament }
+  | {
+      ok: false;
+      error: "not_found" | "auth" | "network" | "unknown";
+      message: string;
+    };
+
+/**
+ * Like getChallongeTournament, but never throws — maps failures for UI messaging.
+ */
+export async function getChallongeTournamentSafe(
+  id: string
+): Promise<ChallongeSafeResult> {
+  try {
+    const tournament = await getChallongeTournament(id);
+    return { ok: true, tournament };
+  } catch (err) {
+    if (err instanceof ChallongeError) {
+      if (err.status === 401 || err.status === 403) {
+        return {
+          ok: false,
+          error: "auth",
+          message: "Challonge rejected the API key",
+        };
+      }
+      if (err.status === 404) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: `No Challonge tournament found for '${id}'`,
+        };
+      }
+      if (err.status === 0 || err.status === 408 || err.status >= 500) {
+        return {
+          ok: false,
+          error: "network",
+          message: "Couldn't reach Challonge",
+        };
+      }
+      return {
+        ok: false,
+        error: "unknown",
+        message: err.message || "Challonge request failed",
+      };
+    }
+
+    return {
+      ok: false,
+      error: "unknown",
+      message:
+        err instanceof Error ? err.message : "Challonge request failed",
+    };
+  }
+}
+
 type JsonApiResource = {
   id?: string;
   type?: string;

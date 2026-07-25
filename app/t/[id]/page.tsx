@@ -5,6 +5,7 @@ import { AppShell } from "@/components/app-shell";
 import { CourtsTab } from "@/components/courts-tab";
 import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
+import { SettingsTab } from "@/components/settings-tab";
 import { requireTO } from "@/lib/auth/require-to";
 import { listCourts } from "@/lib/data/courts";
 import { listEntrants } from "@/lib/data/entrants";
@@ -339,6 +340,14 @@ export default async function TournamentDetailPage({
           />
         ) : activeTab === "courts" ? (
           <CourtsTab initialCourts={courts} tournamentId={tournament.id} />
+        ) : activeTab === "settings" ? (
+          <SettingsTab
+            tournament={{
+              id: tournament.id,
+              name: tournament.name,
+              challonge_id: tournament.challonge_id,
+            }}
+          />
         ) : (
           <PlaceholderTab
             name={TABS.find((tab) => tab.id === activeTab)?.label ?? "Tab"}
