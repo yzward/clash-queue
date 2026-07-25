@@ -1,5 +1,15 @@
 import { listAvailableRefs, type AvailableRef } from "@/lib/data/players";
+import {
+  buildState,
+  computeEffectiveTotals,
+  FINISH_TYPES,
+  getFinishPoints,
+  type FinishTypeId,
+  type MatchScoreState,
+} from "@/lib/scoring/build-state";
 import { createAdminClient } from "@/lib/supabase/admin";
+
+export type { MatchScoreState };
 
 export type TabletTournament = {
   id: string;
@@ -26,11 +36,6 @@ export type TabletRefWithRole = {
   id: string;
   display_name: string;
   role: TabletRefRole;
-};
-
-export type TabletMatchPlayer = {
-  player_id: string;
-  display_name: string;
 };
 
 export type CourtTabletContextOk = {
@@ -75,6 +80,12 @@ export function isCourtUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
+export type TabletMatchPlayer = {
+  player_id: string;
+  display_name: string;
+  match_player_id: string;
+};
+
 export type TabletMatchContext = {
   match: {
     id: string;
@@ -82,10 +93,22 @@ export type TabletMatchContext = {
     tournament_id: string | null;
     court_id: string | null;
     ref_id: string | null;
+    point_cap: number;
+    sets_to_win: number;
   };
   players: TabletMatchPlayer[];
   tournament: { id: string; name: string };
   court: { id: string; name: string };
+};
+
+export type FinishEventRow = {
+  id: string;
+  match_id: string;
+  scorer_player_id: string;
+  finish_type: string;
+  points: number;
+  set_number: number;
+  created_at: string | null;
 };
 
 export type TabletValidatedContext = {
@@ -467,13 +490,16 @@ export async function getCurrentMatchForCourt(
   const [matchResult, mpResult, tournamentResult] = await Promise.all([
     admin
       .from("matches")
-      .select("id, status, tournament_id, court_id, ref_id")
+      .select(
+        "id, status, tournament_id, court_id, ref_id, point_cap, sets_to_win"
+      )
       .eq("id", matchId)
       .maybeSingle(),
     admin
       .from("match_players")
       .select(
         `
+        id,
         player_id,
         created_at,
         players!match_players_player_id_fkey(id, display_name)
@@ -527,7 +553,11 @@ export async function getCurrentMatchForCourt(
       displayName = String(p.display_name ?? "Unknown");
       if (p.id) playerId = String(p.id);
     }
-    return { player_id: playerId, display_name: displayName };
+    return {
+      player_id: playerId,
+      display_name: displayName,
+      match_player_id: String(row.id ?? ""),
+    };
   });
 
   const tournament = tournamentResult.data;
@@ -539,6 +569,14 @@ export async function getCurrentMatchForCourt(
       tournament_id: (match.tournament_id as string | null) ?? null,
       court_id: (match.court_id as string | null) ?? null,
       ref_id: (match.ref_id as string | null) ?? null,
+      point_cap:
+        typeof match.point_cap === "number" && match.point_cap > 0
+          ? match.point_cap
+          : 5,
+      sets_to_win:
+        typeof match.sets_to_win === "number" && match.sets_to_win > 0
+          ? match.sets_to_win
+          : 2,
     },
     players,
     tournament: {
@@ -606,4 +644,381 @@ export async function validateTabletSelection(ids: {
   }
 
   return { tournament, court, ref };
+}
+
+export type GrabMatchResult =
+  | { ok: true; match: TabletMatchContext }
+  | { ok: false; reason: "already_started" | "court_occupied" | "not_found" | "bad_players" };
+
+export type RecordFinishResult =
+  | { ok: true; event: FinishEventRow }
+  | { ok: false; reason: string };
+
+export type SubmitMatchResult =
+  | { ok: true; finalState: MatchScoreState }
+  | { ok: false; reason: "not_complete" | "not_found" | string };
+
+export async function grabMatchForScoring(
+  matchId: string,
+  refPlayerId: string,
+  courtId: string
+): Promise<GrabMatchResult> {
+  const admin = createAdminClient();
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select(
+      "id, status, tournament_id, court_id, ref_id, point_cap, sets_to_win"
+    )
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[tablet:grab] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+
+  const status = String(match.status ?? "");
+  if (status !== "pending") {
+    return { ok: false, reason: "already_started" };
+  }
+
+  const { data: court, error: courtError } = await admin
+    .from("courts")
+    .select("id, name, current_match_id, tournament_id")
+    .eq("id", courtId)
+    .maybeSingle();
+
+  if (courtError) {
+    console.error("[tablet:grab] court", courtError);
+    throw new Error(`Failed to load court: ${courtError.message}`);
+  }
+  if (!court) return { ok: false, reason: "not_found" };
+
+  const occupiedBy = (court.current_match_id as string | null) ?? null;
+  if (occupiedBy && occupiedBy !== matchId) {
+    return { ok: false, reason: "court_occupied" };
+  }
+
+  const now = new Date().toISOString();
+  const patch: Record<string, unknown> = {
+    status: "in_progress",
+    court_id: courtId,
+    updated_at: now,
+  };
+  if (!match.ref_id) {
+    patch.ref_id = refPlayerId;
+  }
+
+  const { error: updateError } = await admin
+    .from("matches")
+    .update(patch)
+    .eq("id", matchId)
+    .eq("status", "pending");
+
+  if (updateError) {
+    console.error("[tablet:grab] update match", updateError);
+    throw new Error(`Failed to start match: ${updateError.message}`);
+  }
+
+  const { error: courtUpdateError } = await admin
+    .from("courts")
+    .update({ current_match_id: matchId })
+    .eq("id", courtId);
+
+  if (courtUpdateError) {
+    console.error("[tablet:grab] update court", courtUpdateError);
+    throw new Error(`Failed to claim court: ${courtUpdateError.message}`);
+  }
+
+  const ctx = await getCurrentMatchForCourt(courtId);
+  if (!ctx || ctx.players.length < 2) {
+    return { ok: false, reason: "bad_players" };
+  }
+  return { ok: true, match: ctx };
+}
+
+export async function fetchFinishEvents(
+  matchId: string
+): Promise<FinishEventRow[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("finish_events")
+    .select(
+      "id, match_id, scorer_player_id, finish_type, points, set_number, created_at"
+    )
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (error) {
+    console.error("[tablet:fetchEvents]", error);
+    throw new Error(`Failed to load finish events: ${error.message}`);
+  }
+
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    match_id: String(row.match_id),
+    scorer_player_id: String(row.scorer_player_id),
+    finish_type: String(row.finish_type),
+    points: typeof row.points === "number" ? row.points : 0,
+    set_number: typeof row.set_number === "number" ? row.set_number : 1,
+    created_at: (row.created_at as string | null) ?? null,
+  }));
+}
+
+export async function recordFinishEvent(
+  matchId: string,
+  scorerPlayerId: string,
+  finishType: FinishTypeId,
+  _refPlayerId: string
+): Promise<RecordFinishResult> {
+  // ref_player_id not on finish_events schema — omitted intentionally.
+  const admin = createAdminClient();
+
+  const finish = FINISH_TYPES.find((f) => f.id === finishType);
+  if (!finish) {
+    return { ok: false, reason: "invalid_finish_type" };
+  }
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select("id, status, point_cap, sets_to_win")
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[tablet:record] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+  if (String(match.status) !== "in_progress") {
+    return { ok: false, reason: "match_not_in_progress" };
+  }
+
+  const { data: mps, error: mpError } = await admin
+    .from("match_players")
+    .select("id, player_id, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true });
+
+  if (mpError) {
+    console.error("[tablet:record] players", mpError);
+    throw new Error(`Failed to load match players: ${mpError.message}`);
+  }
+
+  const playerIds = (mps ?? []).map((m) => String(m.player_id));
+  if (!playerIds.includes(scorerPlayerId)) {
+    return { ok: false, reason: "scorer_not_in_match" };
+  }
+
+  const existing = await fetchFinishEvents(matchId);
+  const p1Id = playerIds[0];
+  const p2Id = playerIds[1] ?? null;
+  const pointCap =
+    typeof match.point_cap === "number" && match.point_cap > 0
+      ? match.point_cap
+      : 5;
+  const setsToWin =
+    typeof match.sets_to_win === "number" && match.sets_to_win > 0
+      ? match.sets_to_win
+      : 2;
+  const before = buildState(existing, p1Id, pointCap, setsToWin, p2Id);
+  if (before.matchComplete) {
+    return { ok: false, reason: "match_already_complete" };
+  }
+
+  const { data: inserted, error: insertError } = await admin
+    .from("finish_events")
+    .insert({
+      match_id: matchId,
+      scorer_player_id: scorerPlayerId,
+      finish_type: finish.id,
+      points: getFinishPoints(finish.id),
+      set_number: before.currentSet,
+    })
+    .select(
+      "id, match_id, scorer_player_id, finish_type, points, set_number, created_at"
+    )
+    .single();
+
+  if (insertError || !inserted) {
+    console.error("[tablet:record] insert", insertError);
+    return {
+      ok: false,
+      reason: insertError?.message ?? "insert_failed",
+    };
+  }
+
+  const allEvents = [...existing, {
+    id: String(inserted.id),
+    match_id: String(inserted.match_id),
+    scorer_player_id: String(inserted.scorer_player_id),
+    finish_type: String(inserted.finish_type),
+    points: typeof inserted.points === "number" ? inserted.points : 0,
+    set_number:
+      typeof inserted.set_number === "number" ? inserted.set_number : 1,
+    created_at: (inserted.created_at as string | null) ?? null,
+  }];
+  const next = buildState(allEvents, p1Id, pointCap, setsToWin, p2Id);
+
+  await admin
+    .from("matches")
+    .update({
+      score1: next.score1,
+      score2: next.score2,
+      sets_won1: next.setsWon1,
+      sets_won2: next.setsWon2,
+      current_set: next.currentSet,
+      status: "in_progress",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", matchId);
+
+  return {
+    ok: true,
+    event: {
+      id: String(inserted.id),
+      match_id: String(inserted.match_id),
+      scorer_player_id: String(inserted.scorer_player_id),
+      finish_type: String(inserted.finish_type),
+      points: typeof inserted.points === "number" ? inserted.points : 0,
+      set_number:
+        typeof inserted.set_number === "number" ? inserted.set_number : 1,
+      created_at: (inserted.created_at as string | null) ?? null,
+    },
+  };
+}
+
+/**
+ * Local submit only — no Challonge / ranking writeback (10.a.3).
+ */
+export async function submitMatchResult(
+  matchId: string,
+  _actorRefPlayerId: string
+): Promise<SubmitMatchResult> {
+  const admin = createAdminClient();
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select(
+      "id, status, court_id, point_cap, sets_to_win, winner_id"
+    )
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[tablet:submit] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+
+  if (String(match.status) === "submitted") {
+    const events = await fetchFinishEvents(matchId);
+    const { data: mps } = await admin
+      .from("match_players")
+      .select("player_id, created_at")
+      .eq("match_id", matchId)
+      .order("created_at", { ascending: true });
+    const p1Id = String(mps?.[0]?.player_id ?? "");
+    const p2Id = mps?.[1] ? String(mps[1].player_id) : null;
+    const pointCap =
+      typeof match.point_cap === "number" && match.point_cap > 0
+        ? match.point_cap
+        : 5;
+    const setsToWin =
+      typeof match.sets_to_win === "number" && match.sets_to_win > 0
+        ? match.sets_to_win
+        : 2;
+    const finalState = buildState(events, p1Id, pointCap, setsToWin, p2Id);
+    return { ok: true, finalState };
+  }
+
+  const { data: mps, error: mpError } = await admin
+    .from("match_players")
+    .select("id, player_id, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true });
+
+  if (mpError || !mps || mps.length < 2) {
+    return { ok: false, reason: "bad_players" };
+  }
+
+  const p1 = mps[0];
+  const p2 = mps[1];
+  const p1Id = String(p1.player_id);
+  const p2Id = String(p2.player_id);
+  const pointCap =
+    typeof match.point_cap === "number" && match.point_cap > 0
+      ? match.point_cap
+      : 5;
+  const setsToWin =
+    typeof match.sets_to_win === "number" && match.sets_to_win > 0
+      ? match.sets_to_win
+      : 2;
+
+  const events = await fetchFinishEvents(matchId);
+  const finalState = buildState(events, p1Id, pointCap, setsToWin, p2Id);
+  if (!finalState.matchComplete || !finalState.winnerId) {
+    return { ok: false, reason: "not_complete" };
+  }
+
+  const totals = computeEffectiveTotals(events, p1Id, pointCap, setsToWin);
+  const now = new Date().toISOString();
+
+  const { error: updateError } = await admin
+    .from("matches")
+    .update({
+      status: "submitted",
+      winner_id: finalState.winnerId,
+      score1: finalState.score1,
+      score2: finalState.score2,
+      sets_won1: finalState.setsWon1,
+      sets_won2: finalState.setsWon2,
+      current_set: finalState.currentSet,
+      updated_at: now,
+    })
+    .eq("id", matchId)
+    .neq("status", "submitted");
+
+  if (updateError) {
+    console.error("[tablet:submit] update match", updateError);
+    throw new Error(`Failed to submit match: ${updateError.message}`);
+  }
+
+  await Promise.all([
+    admin
+      .from("match_players")
+      .update({
+        sets_won: finalState.setsWon1,
+        total_points: totals.p1Total,
+        winner: finalState.winnerId === p1Id,
+      })
+      .eq("id", p1.id),
+    admin
+      .from("match_players")
+      .update({
+        sets_won: finalState.setsWon2,
+        total_points: totals.p2Total,
+        winner: finalState.winnerId === p2Id,
+      })
+      .eq("id", p2.id),
+  ]);
+
+  const courtId = (match.court_id as string | null) ?? null;
+  if (courtId) {
+    await admin
+      .from("courts")
+      .update({ current_match_id: null })
+      .eq("id", courtId)
+      .eq("current_match_id", matchId);
+  } else {
+    await admin
+      .from("courts")
+      .update({ current_match_id: null })
+      .eq("current_match_id", matchId);
+  }
+
+  return { ok: true, finalState };
 }

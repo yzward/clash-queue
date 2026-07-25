@@ -1,15 +1,23 @@
 "use server";
 
 import {
+  fetchFinishEvents,
   getCurrentMatchForCourt,
   getTabletContext,
+  grabMatchForScoring,
   listActiveTournamentsForTablet,
   listCourtsForTournament,
   listRefsForTablet,
   listRefsForTabletWithRoles,
+  recordFinishEvent,
+  submitMatchResult,
   validateTabletSelection,
   verifyTabletPin,
   type CourtTabletContextResult,
+  type FinishEventRow,
+  type GrabMatchResult,
+  type RecordFinishResult,
+  type SubmitMatchResult,
   type TabletCourt,
   type TabletMatchContext,
   type TabletRef,
@@ -17,6 +25,10 @@ import {
   type TabletTournament,
   type TabletValidatedContext,
 } from "@/lib/data/tablet";
+import {
+  FINISH_TYPES,
+  type FinishTypeId,
+} from "@/lib/scoring/build-state";
 
 export type TabletListTournamentsResult =
   | { ok: true; tournaments: TabletTournament[] }
@@ -179,6 +191,82 @@ export async function refreshCurrentMatchAction(
     return {
       ok: false,
       error: err instanceof Error ? err.message : "Failed to load match",
+    };
+  }
+}
+
+export async function grabMatchAction(
+  matchId: string,
+  refPlayerId: string,
+  courtId: string
+): Promise<GrabMatchResult | { ok: false; reason: string }> {
+  try {
+    return await grabMatchForScoring(matchId, refPlayerId, courtId);
+  } catch (err) {
+    console.error("[grabMatchAction]", err);
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : "Failed to start match",
+    };
+  }
+}
+
+export async function fetchFinishEventsAction(
+  matchId: string
+): Promise<
+  | { ok: true; events: FinishEventRow[] }
+  | { ok: false; error: string }
+> {
+  try {
+    const events = await fetchFinishEvents(matchId);
+    return { ok: true, events };
+  } catch (err) {
+    console.error("[fetchFinishEventsAction]", err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Failed to load events",
+    };
+  }
+}
+
+const FINISH_IDS = new Set<string>(FINISH_TYPES.map((f) => f.id));
+
+export async function recordFinishEventAction(
+  matchId: string,
+  scorerPlayerId: string,
+  finishType: string,
+  refPlayerId: string
+): Promise<RecordFinishResult> {
+  try {
+    if (!FINISH_IDS.has(finishType)) {
+      return { ok: false, reason: "invalid_finish_type" };
+    }
+    return await recordFinishEvent(
+      matchId,
+      scorerPlayerId,
+      finishType as FinishTypeId,
+      refPlayerId
+    );
+  } catch (err) {
+    console.error("[recordFinishEventAction]", err);
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : "Failed to record finish",
+    };
+  }
+}
+
+export async function submitMatchResultAction(
+  matchId: string,
+  actorRefPlayerId: string
+): Promise<SubmitMatchResult> {
+  try {
+    return await submitMatchResult(matchId, actorRefPlayerId);
+  } catch (err) {
+    console.error("[submitMatchResultAction]", err);
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : "Failed to submit match",
     };
   }
 }

@@ -20,12 +20,10 @@ import {
   selectRefAction,
   verifyTabletPinAction,
 } from "@/app/tablet/actions";
+import { TabletScorer } from "@/components/tablet/tablet-scorer";
 import { Button } from "@/components/ui/button";
 import {
-  Tooltip,
-  TooltipContent,
   TooltipProvider,
-  TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type {
   CourtTabletContextOk,
@@ -371,6 +369,7 @@ export default function TabletCourtPage() {
   const [match, setMatch] = useState<TabletMatchContext | null>(null);
   const [loadingRefs, setLoadingRefs] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const scoringSessionRef = useRef(false);
 
   const loadContext = useCallback(async () => {
     setBooting(true);
@@ -452,7 +451,10 @@ export default function TabletCourtPage() {
         () => {
           startTransition(() => {
             void refreshCurrentMatchAction(context.court.id).then((r) => {
-              if (r.ok) setMatch(r.match);
+              if (!r.ok) return;
+              // Keep local match through summary after court is cleared on submit.
+              if (r.match == null && scoringSessionRef.current) return;
+              setMatch(r.match);
             });
           });
         }
@@ -470,7 +472,9 @@ export default function TabletCourtPage() {
         () => {
           startTransition(() => {
             void refreshCurrentMatchAction(context.court.id).then((r) => {
-              if (r.ok) setMatch(r.match);
+              if (!r.ok) return;
+              if (r.match == null && scoringSessionRef.current) return;
+              setMatch(r.match);
             });
           });
         }
@@ -668,58 +672,42 @@ export default function TabletCourtPage() {
               </Button>
             </header>
 
-            <div className="flex flex-1 flex-col items-center justify-center py-10">
+            <div className="flex flex-1 flex-col items-center justify-center py-6">
               {isPending && !match ? (
                 <Loader2 className="size-8 animate-spin text-[#a78bfa]" />
               ) : match ? (
-                <div className="flex w-full max-w-lg flex-col items-center text-center">
-                  <div className="mb-4">
-                    {match.match.status === "in_progress" ? (
+                <div className="flex w-full flex-1 flex-col items-center">
+                  {match.match.status === "in_progress" ? (
+                    <div className="mb-3 self-center">
                       <LivePill />
-                    ) : (
-                      <span
-                        className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium text-muted-foreground"
-                        style={{ background: "rgba(255,255,255,0.06)" }}
-                      >
-                        {statusLabel(match.match.status)}
-                      </span>
-                    )}
-                  </div>
+                    </div>
+                  ) : match.match.status === "pending" ? (
+                    <span
+                      className="mb-3 inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium text-muted-foreground"
+                      style={{ background: "rgba(255,255,255,0.06)" }}
+                    >
+                      {statusLabel(match.match.status)}
+                    </span>
+                  ) : null}
 
-                  <p
-                    className="text-3xl font-semibold sm:text-4xl"
-                    style={{ color: "var(--scorer-p1)" }}
-                  >
-                    {match.players[0]?.display_name ?? "TBD"}
-                  </p>
-                  <p className="my-3 text-sm font-medium uppercase tracking-widest text-muted-foreground">
-                    vs
-                  </p>
-                  <p
-                    className="text-3xl font-semibold sm:text-4xl"
-                    style={{ color: "var(--scorer-p2)" }}
-                  >
-                    {match.players[1]?.display_name ?? "TBD"}
-                  </p>
-
-                  <p className="mt-10 text-[13px] text-muted-foreground">
-                    Scoring UI comes next
-                  </p>
-
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="mt-4 inline-flex">
-                        <Button
-                          type="button"
-                          disabled
-                          className="min-h-11 bg-[#a78bfa]/40 text-[#0a0a12]"
-                        >
-                          Start match
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>Coming next step</TooltipContent>
-                  </Tooltip>
+                  <TabletScorer
+                    matchCtx={match}
+                    refPlayerId={refPlayer.id}
+                    courtId={context.court.id}
+                    onMatchUpdated={setMatch}
+                    onScoringSessionChange={(active) => {
+                      scoringSessionRef.current = active;
+                    }}
+                    onReady={() => {
+                      scoringSessionRef.current = false;
+                      setMatch(null);
+                      void refreshCurrentMatchAction(context.court.id).then(
+                        (r) => {
+                          if (r.ok) setMatch(r.match);
+                        }
+                      );
+                    }}
+                  />
                 </div>
               ) : (
                 <div className="flex flex-col items-center text-center">
