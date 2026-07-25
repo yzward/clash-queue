@@ -1,17 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { AlertTriangle, Check, Loader2, RefreshCw, X } from "lucide-react";
+import { toast } from "sonner";
 
-import { refreshPreflight } from "@/app/t/[id]/actions";
+import {
+  generateMatchesAction,
+  refreshPreflight,
+} from "@/app/t/[id]/actions";
 import { Button } from "@/components/ui/button";
 import type {
   PreflightCheck,
   PreflightResult,
 } from "@/lib/preflight/checks";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
 
 const LOGO_CLIP =
   "polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px))";
@@ -90,15 +93,21 @@ function StatusIcon({ check }: { check: PreflightCheck }) {
 
 function CheckFixButton({
   check,
+  tournamentId,
+  onGenerated,
 }: {
   check: PreflightCheck;
+  tournamentId: string;
+  onGenerated: () => void;
 }) {
   const action = check.fix_action;
+  const [isPending, startTransition] = useTransition();
+
   if (!action || check.status === "pass") return null;
 
   const isRed = check.severity === "red";
   const className = cn(
-    "inline-flex h-6 items-center rounded-md px-2 text-[10px] font-semibold transition-opacity hover:opacity-90",
+    "inline-flex h-6 items-center gap-1 rounded-md px-2 text-[10px] font-semibold transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60",
     isRed
       ? "bg-[#ef4444] text-white"
       : "border border-[#fbbf24]/50 bg-transparent text-[#fbbf24]"
@@ -126,6 +135,47 @@ function CheckFixButton({
   }
 
   if ("action" in action) {
+    if (action.action === "generate_matches") {
+      return (
+        <button
+          type="button"
+          className={className}
+          disabled={isPending}
+          onClick={() => {
+            startTransition(async () => {
+              const result = await generateMatchesAction(tournamentId);
+              if (!result.ok) {
+                toast.error(result.error);
+                return;
+              }
+              if (result.skipped > 0 && result.generated === 0) {
+                toast.success(
+                  `No new matches — ${result.skipped} already existed`
+                );
+              } else if (result.skipped > 0) {
+                toast.success(
+                  `Generated ${result.generated} matches (${result.skipped} skipped)`
+                );
+              } else {
+                toast.success(`Generated ${result.generated} matches`);
+              }
+              if (result.errors.length > 0) {
+                toast.error(
+                  `${result.errors.length} match${result.errors.length === 1 ? "" : "es"} failed to import`
+                );
+              }
+              onGenerated();
+            });
+          }}
+        >
+          {isPending ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : null}
+          {action.label}
+        </button>
+      );
+    }
+
     // Stub — sync_participants server action comes later
     return (
       <button type="button" className={className} title="Coming soon" disabled>
@@ -219,7 +269,11 @@ export function PreflightCard({
                 </p>
               ) : null}
             </div>
-            <CheckFixButton check={check} />
+            <CheckFixButton
+              check={check}
+              tournamentId={tournamentId}
+              onGenerated={handleRefresh}
+            />
           </li>
         ))}
       </ul>

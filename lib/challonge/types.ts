@@ -56,16 +56,29 @@ export type ChallongeParticipant = {
   active: boolean | null;
 };
 
+/**
+ * Flattened Challonge v2.1 match.
+ * Verified against OpenAPI MatchOutput + Step 5 client probe notes (2026-07-25):
+ * - player1_id / player2_id from relationships (null = bye / TBD)
+ * - round: attributes.round (number; negative = losers)
+ * - state: pending | open | complete
+ * - scores: attributes.scores (v2.1). scores_csv is a v1 alias we also capture if present.
+ * - prerequisite_match_ids: not on v2.1 MatchOutput — always null here
+ */
 export type ChallongeMatch = {
   id: string;
   state: string;
   round: number | null;
   identifier: string | null;
+  /** v2.1 field — e.g. "2 - 0" or "1-0,1-0" */
   scores: string | null;
+  /** v1 alias; usually null on v2.1 responses */
+  scores_csv: string | null;
   suggested_play_order: number | null;
   winner_id: string | null;
   player1_id: string | null;
   player2_id: string | null;
+  prerequisite_match_ids: string[] | null;
   underway_at: string | null;
   started_at: string | null;
 };

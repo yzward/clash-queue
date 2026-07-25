@@ -1,0 +1,421 @@
+/**
+ * Local match reads + Challonge → Supabase match generation.
+ *
+ * Challonge v2.1 match shape (Open Division Test nl7udlbm + Apidog MatchOutput,
+ * 2026-07-25). Live re-probe of GET /tournaments/nl7udlbm/matches.json was
+ * blocked locally: CHALLONGE_API_KEY is Sensitive on Vercel and `vercel env pull`
+ * leaves an empty placeholder. Field names below match Step 5 verified client
+ * behaviour + Challonge v2.1 OpenAPI:
+ *
+ * - id: data.id (string)
+ * - player1_id / player2_id: relationships.player1|player2.data.id (null when
+ *   bye / unresolved future slot — JSON:API data: null)
+ * - round: attributes.round (integer; negative = losers bracket)
+ * - state: attributes.state — enum pending | open | complete
+ * - scores: attributes.scores (v2.1; NOT v1 scores_csv). Example "2 - 0" or
+ *   "1-0,1-0". We accept either and treat as scores_csv-equivalent.
+ * - winner_id: attributes.winner_id (participant id; may be number or string)
+ * - prerequisite_match_ids: NOT present on v2.1 MatchOutput (v1 had
+ *   prerequisite_match_ids_csv). Do not rely on them for generation.
+ * - Local schema: matches has `stage` (text), not `round`. We store a round
+ *   label in stage. Unique (tournament_id, challonge_match_id) already exists.
+ */
+
+import { getChallongeMatches } from "@/lib/challonge/client";
+import type { ChallongeMatch } from "@/lib/challonge/types";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+export type MatchRow = {
+  id: string;
+  tournament_id: string | null;
+  status: string | null;
+  ref_id: string | null;
+  court_id: string | null;
+  stage: string | null;
+  winner_id: string | null;
+  challonge_match_id: string | null;
+  played_at: string | null;
+  score1: number | null;
+  score2: number | null;
+  sets_won1: number | null;
+  sets_won2: number | null;
+  court_number: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type MatchPlayerRow = {
+  player_id: string;
+  display_name: string;
+  sets_won: number | null;
+  winner: boolean | null;
+};
+
+export type MatchWithPlayers = {
+  match: MatchRow;
+  players: MatchPlayerRow[];
+};
+
+export type GenerateMatchesError = {
+  challongeMatchId: string;
+  reason: string;
+};
+
+export type GenerateMatchesResult = {
+  generated: number;
+  skipped: number;
+  errors: GenerateMatchesError[];
+};
+
+function mapMatchRow(row: Record<string, unknown>): MatchRow {
+  return {
+    id: String(row.id),
+    tournament_id: (row.tournament_id as string | null) ?? null,
+    status: (row.status as string | null) ?? null,
+    ref_id: (row.ref_id as string | null) ?? null,
+    court_id: (row.court_id as string | null) ?? null,
+    stage: (row.stage as string | null) ?? null,
+    winner_id: (row.winner_id as string | null) ?? null,
+    challonge_match_id: (row.challonge_match_id as string | null) ?? null,
+    played_at: (row.played_at as string | null) ?? null,
+    score1: typeof row.score1 === "number" ? row.score1 : null,
+    score2: typeof row.score2 === "number" ? row.score2 : null,
+    sets_won1: typeof row.sets_won1 === "number" ? row.sets_won1 : null,
+    sets_won2: typeof row.sets_won2 === "number" ? row.sets_won2 : null,
+    court_number:
+      typeof row.court_number === "number" ? row.court_number : null,
+    created_at: (row.created_at as string | null) ?? null,
+    updated_at: (row.updated_at as string | null) ?? null,
+  };
+}
+
+function roundLabel(round: number | null): string | null {
+  if (round == null || Number.isNaN(round)) return null;
+  return round > 0 ? `Round ${round}` : `Losers Round ${Math.abs(round)}`;
+}
+
+/**
+ * Parse Challonge v2.1 `scores` (or v1-style csv) into set wins.
+ * Accepts "2-1", "2 - 0", "1-0,1-0". Returns null if the string is present
+ * but not parseable — caller should leave the match pending.
+ */
+export function parseChallongeScores(
+  scores: string | null | undefined
+): { sets1: number; sets2: number } | null {
+  if (scores == null) return null;
+  const trimmed = scores.trim();
+  if (!trimmed) return null;
+
+  const segments = trimmed.split(",");
+  let sets1 = 0;
+  let sets2 = 0;
+
+  for (const segment of segments) {
+    const parts = segment.trim().split(/\s*-\s*/);
+    if (parts.length !== 2) {
+      return null;
+    }
+    const a = Number.parseInt(parts[0]!, 10);
+    const b = Number.parseInt(parts[1]!, 10);
+    if (Number.isNaN(a) || Number.isNaN(b)) {
+      return null;
+    }
+    sets1 += a;
+    sets2 += b;
+  }
+
+  return { sets1, sets2 };
+}
+
+export async function listMatches(tournamentId: string): Promise<MatchRow[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("matches")
+    .select("*")
+    .eq("tournament_id", tournamentId)
+    .order("stage", { ascending: true, nullsFirst: false })
+    .order("id", { ascending: true });
+
+  if (error) {
+    console.error("[matches:list]", error);
+    throw new Error(`Failed to list matches: ${error.message}`);
+  }
+
+  return ((data ?? []) as Record<string, unknown>[]).map(mapMatchRow);
+}
+
+export async function listMatchesWithPlayers(
+  tournamentId: string
+): Promise<MatchWithPlayers[]> {
+  const admin = createAdminClient();
+
+  const matches = await listMatches(tournamentId);
+  if (matches.length === 0) return [];
+
+  const matchIds = matches.map((m) => m.id);
+  const { data, error } = await admin
+    .from("match_players")
+    .select(
+      `
+      match_id,
+      player_id,
+      sets_won,
+      winner,
+      created_at,
+      players!match_players_player_id_fkey(
+        id,
+        display_name
+      )
+    `
+    )
+    .in("match_id", matchIds)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    console.error("[matches:listWithPlayers]", error);
+    throw new Error(`Failed to list match players: ${error.message}`);
+  }
+
+  const byMatch = new Map<string, MatchPlayerRow[]>();
+  for (const row of (data ?? []) as Record<string, unknown>[]) {
+    const matchId = String(row.match_id);
+    const playersRaw = row.players;
+    let displayName = "Unknown";
+    if (
+      playersRaw &&
+      typeof playersRaw === "object" &&
+      !Array.isArray(playersRaw)
+    ) {
+      displayName = String(
+        (playersRaw as Record<string, unknown>).display_name ?? "Unknown"
+      );
+    }
+    const list = byMatch.get(matchId) ?? [];
+    list.push({
+      player_id: String(row.player_id),
+      display_name: displayName,
+      sets_won: typeof row.sets_won === "number" ? row.sets_won : null,
+      winner: typeof row.winner === "boolean" ? row.winner : null,
+    });
+    byMatch.set(matchId, list);
+  }
+
+  return matches.map((match) => ({
+    match,
+    players: byMatch.get(match.id) ?? [],
+  }));
+}
+
+export async function generateMatchesFromChallonge(
+  tournamentId: string,
+  challongeId: string,
+  actorPlayerId: string
+): Promise<GenerateMatchesResult> {
+  const admin = createAdminClient();
+  const result: GenerateMatchesResult = {
+    generated: 0,
+    skipped: 0,
+    errors: [],
+  };
+
+  console.log(
+    `[matches:generate] start tournament=${tournamentId} challonge=${challongeId} actor=${actorPlayerId}`
+  );
+
+  const { data: entrantRows, error: entrantError } = await admin
+    .from("tournament_entrants")
+    .select("id, player_id, startgg_entrant_id")
+    .eq("tournament_id", tournamentId)
+    .not("startgg_entrant_id", "is", null);
+
+  if (entrantError) {
+    console.error("[matches:generate] entrants", entrantError);
+    throw new Error(`Failed to load entrants: ${entrantError.message}`);
+  }
+
+  const participantMap = new Map<
+    string,
+    { entrantId: string; playerId: string }
+  >();
+  for (const row of entrantRows ?? []) {
+    const challongeParticipantId =
+      row.startgg_entrant_id == null ? null : String(row.startgg_entrant_id);
+    const playerId = row.player_id == null ? null : String(row.player_id);
+    if (!challongeParticipantId || !playerId) continue;
+    participantMap.set(challongeParticipantId, {
+      entrantId: String(row.id),
+      playerId,
+    });
+  }
+
+  const { data: existingRows, error: existingError } = await admin
+    .from("matches")
+    .select("id, challonge_match_id")
+    .eq("tournament_id", tournamentId)
+    .not("challonge_match_id", "is", null);
+
+  if (existingError) {
+    console.error("[matches:generate] existing", existingError);
+    throw new Error(`Failed to load existing matches: ${existingError.message}`);
+  }
+
+  const existingByChallongeId = new Set(
+    (existingRows ?? [])
+      .map((r) => (r.challonge_match_id == null ? null : String(r.challonge_match_id)))
+      .filter((id): id is string => Boolean(id))
+  );
+
+  const challongeMatches = await getChallongeMatches(challongeId);
+
+  for (const cm of challongeMatches) {
+    await ingestOneChallongeMatch({
+      admin,
+      tournamentId,
+      cm,
+      participantMap,
+      existingByChallongeId,
+      result,
+    });
+  }
+
+  console.log(
+    `[matches:generate] done generated=${result.generated} skipped=${result.skipped} errors=${result.errors.length}`
+  );
+
+  return result;
+}
+
+async function ingestOneChallongeMatch(args: {
+  admin: ReturnType<typeof createAdminClient>;
+  tournamentId: string;
+  cm: ChallongeMatch;
+  participantMap: Map<string, { entrantId: string; playerId: string }>;
+  existingByChallongeId: Set<string>;
+  result: GenerateMatchesResult;
+}): Promise<void> {
+  const { admin, tournamentId, cm, participantMap, existingByChallongeId, result } =
+    args;
+  const challongeMatchId = String(cm.id);
+
+  if (!cm.player1_id || !cm.player2_id) {
+    // Bye or unresolved future match — ignore (not an error, not "skipped").
+    return;
+  }
+
+  if (existingByChallongeId.has(challongeMatchId)) {
+    // Idempotent re-run — already in DB; do not modify.
+    result.skipped++;
+    return;
+  }
+
+  const p1 = participantMap.get(String(cm.player1_id));
+  const p2 = participantMap.get(String(cm.player2_id));
+
+  if (!p1) {
+    const reason = `Challonge participant ${cm.player1_id} not mapped to local entrant`;
+    console.error(`[matches:generate] ${reason}`);
+    result.errors.push({ challongeMatchId, reason });
+    return;
+  }
+  if (!p2) {
+    const reason = `Challonge participant ${cm.player2_id} not mapped to local entrant`;
+    console.error(`[matches:generate] ${reason}`);
+    result.errors.push({ challongeMatchId, reason });
+    return;
+  }
+
+  let status: "pending" | "submitted" = "pending";
+  let winnerId: string | null = null;
+  let sets1 = 0;
+  let sets2 = 0;
+
+  if (cm.state === "complete") {
+    const rawScores = cm.scores ?? cm.scores_csv;
+    const parsed = parseChallongeScores(rawScores);
+    if (parsed) {
+      status = "submitted";
+      sets1 = parsed.sets1;
+      sets2 = parsed.sets2;
+      if (cm.winner_id != null) {
+        const mapped = participantMap.get(String(cm.winner_id));
+        winnerId = mapped?.playerId ?? null;
+        if (!winnerId) {
+          console.error(
+            `[matches:generate] winner participant ${cm.winner_id} not mapped — leaving winner_id null`,
+            { challongeMatchId, scores: rawScores }
+          );
+        }
+      }
+    } else {
+      console.error(
+        "[matches:generate] uncertain scores — inserting as pending",
+        { challongeMatchId, scores: rawScores, state: cm.state }
+      );
+    }
+  }
+
+  const now = new Date().toISOString();
+  const { data: inserted, error: insertError } = await admin
+    .from("matches")
+    .insert({
+      tournament_id: tournamentId,
+      challonge_match_id: challongeMatchId,
+      stage: roundLabel(cm.round),
+      status,
+      winner_id: winnerId,
+      score1: status === "submitted" ? sets1 : 0,
+      score2: status === "submitted" ? sets2 : 0,
+      sets_won1: status === "submitted" ? sets1 : 0,
+      sets_won2: status === "submitted" ? sets2 : 0,
+      created_at: now,
+    })
+    .select("id")
+    .single();
+
+  if (insertError || !inserted) {
+    // Unique violation = race with another TO — treat as skip.
+    if (insertError?.code === "23505") {
+      result.skipped++;
+      existingByChallongeId.add(challongeMatchId);
+      return;
+    }
+    const reason = insertError?.message ?? "Failed to insert match";
+    console.error("[matches:generate] insert match", insertError);
+    result.errors.push({ challongeMatchId, reason });
+    return;
+  }
+
+  const matchId = String(inserted.id);
+  const { error: mpError } = await admin.from("match_players").insert([
+    {
+      match_id: matchId,
+      player_id: p1.playerId,
+      sets_won: sets1,
+      total_points: 0,
+      winner: Boolean(winnerId && winnerId === p1.playerId),
+      created_at: now,
+    },
+    {
+      match_id: matchId,
+      player_id: p2.playerId,
+      sets_won: sets2,
+      total_points: 0,
+      winner: Boolean(winnerId && winnerId === p2.playerId),
+      created_at: now,
+    },
+  ]);
+
+  if (mpError) {
+    console.error("[matches:generate] insert match_players", mpError);
+    // Roll back orphan match so a retry can recreate cleanly.
+    await admin.from("matches").delete().eq("id", matchId);
+    result.errors.push({
+      challongeMatchId,
+      reason: `match_players insert failed: ${mpError.message}`,
+    });
+    return;
+  }
+
+  existingByChallongeId.add(challongeMatchId);
+  result.generated++;
+}

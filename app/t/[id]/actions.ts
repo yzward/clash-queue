@@ -31,6 +31,7 @@ import {
 } from "@/lib/data/players";
 import {
   CHALLONGE_PUSH_BLOCKED_STATES,
+  CHALLONGE_STARTED_STATES,
   ChallongePushError,
   getChallongeTournament,
   getChallongeTournamentSafe,
@@ -39,6 +40,10 @@ import {
   pushParticipantsBulk,
 } from "@/lib/challonge/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  generateMatchesFromChallonge,
+  type GenerateMatchesResult,
+} from "@/lib/data/matches";
 import {
   clearTournamentChallongeReferences,
   countChallongeLinkedData,
@@ -99,6 +104,10 @@ export type PushToChallongeResult =
 
 export type SyncFromChallongeResult =
   | ({ ok: true } & ChallongeIdSyncResult)
+  | { ok: false; error: string };
+
+export type GenerateMatchesActionResult =
+  | ({ ok: true } & GenerateMatchesResult)
   | { ok: false; error: string };
 
 export type ChallongePreview = {
@@ -567,6 +576,70 @@ export async function syncFromChallongeAction(
     console.error("[syncFromChallongeAction]", err);
     const message =
       err instanceof Error ? err.message : "Failed to sync from Challonge";
+    return { ok: false, error: message };
+  }
+}
+
+export async function generateMatchesAction(
+  tournamentId: string
+): Promise<GenerateMatchesActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const linked = await loadTournamentChallongeId(tournamentId);
+    if ("error" in linked) {
+      return { ok: false, error: linked.error };
+    }
+
+    const { challongeId } = linked;
+    const challongeTournament = await getChallongeTournament(challongeId);
+    if (!CHALLONGE_STARTED_STATES.has(challongeTournament.state)) {
+      return {
+        ok: false,
+        error:
+          "Challonge bracket not started yet — start it on Challonge before generating matches",
+      };
+    }
+
+    const admin = createAdminClient();
+    const { data: entrants, error: entrantsError } = await admin
+      .from("tournament_entrants")
+      .select("id, startgg_entrant_id, entrant_status")
+      .eq("tournament_id", tournamentId)
+      .eq("entrant_status", "confirmed");
+
+    if (entrantsError) {
+      console.error("[generateMatchesAction] entrants", entrantsError);
+      return {
+        ok: false,
+        error: `Failed to load entrants: ${entrantsError.message}`,
+      };
+    }
+
+    const unsynced = (entrants ?? []).filter(
+      (e) => e.startgg_entrant_id == null
+    );
+    if (unsynced.length > 0) {
+      return {
+        ok: false,
+        error: `Some entrants are not synced to Challonge — run Pull from Challonge first (${unsynced.length} missing)`,
+      };
+    }
+
+    const result = await generateMatchesFromChallonge(
+      tournamentId,
+      challongeId,
+      auth.playerId
+    );
+    revalidatePath(`/t/${tournamentId}`);
+    return { ok: true, ...result };
+  } catch (err) {
+    console.error("[generateMatchesAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to generate matches";
     return { ok: false, error: message };
   }
 }

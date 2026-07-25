@@ -11,6 +11,9 @@
  *   ({ group_size, participant_count_to_advance_per_group, stage_type, ... })
  * - Participant ids are strings in data.id; attributes include name, seed, misc
  * - Match player ids live in relationships.player1/player2.data.id (not attributes)
+ * - Match scores live in attributes.scores (v2.1; not v1 scores_csv). Example "2 - 0"
+ * - Match state enum: pending | open | complete; round is attributes.round (int)
+ * - prerequisite_match_ids_csv is v1-only — absent from v2.1 MatchOutput
  * - URL slug (nl7udlbm) and numeric id both work in /tournaments/{id}.json paths
  *
  * Write shapes (2026-07-25, from Challonge v2.1 OpenAPI / Apidog; live POST
@@ -57,6 +60,15 @@ export class ChallongePushError extends Error {
     this.body = body ?? null;
   }
 }
+
+/** Bracket has been started — matches exist (or will) on Challonge. */
+export const CHALLONGE_STARTED_STATES = new Set([
+  "underway",
+  "group_stages_underway",
+  "group_stages_finalized",
+  "awaiting_review",
+  "complete",
+]);
 
 /** Bracket states where Challonge rejects new participants. */
 export const CHALLONGE_PUSH_BLOCKED_STATES = new Set([
@@ -380,20 +392,33 @@ function normaliseMatch(resource: JsonApiResource): ChallongeMatch {
   const attrs = resource.attributes ?? {};
   const timestamps = (attrs.timestamps ?? {}) as Record<string, unknown>;
 
+  const scores =
+    typeof attrs.scores === "string"
+      ? attrs.scores
+      : typeof attrs.scores_csv === "string"
+        ? attrs.scores_csv
+        : null;
+
   return {
     id: String(resource.id ?? ""),
     state: String(attrs.state ?? ""),
     round: typeof attrs.round === "number" ? attrs.round : null,
     identifier: typeof attrs.identifier === "string" ? attrs.identifier : null,
-    scores: typeof attrs.scores === "string" ? attrs.scores : null,
+    scores,
+    scores_csv:
+      typeof attrs.scores_csv === "string" ? attrs.scores_csv : null,
     suggested_play_order:
       typeof attrs.suggested_play_order === "number"
         ? attrs.suggested_play_order
         : null,
     winner_id:
-      attrs.winner_id == null ? null : String(attrs.winner_id),
+      attrs.winner_id == null
+        ? relationshipId(resource, "winner")
+        : String(attrs.winner_id),
+    // Null when bye / unresolved future slot (relationships.*.data is null).
     player1_id: relationshipId(resource, "player1"),
     player2_id: relationshipId(resource, "player2"),
+    prerequisite_match_ids: null,
     underway_at:
       typeof timestamps.underway_at === "string"
         ? timestamps.underway_at

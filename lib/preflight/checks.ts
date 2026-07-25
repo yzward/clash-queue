@@ -1,5 +1,6 @@
 import {
   ChallongeError,
+  CHALLONGE_STARTED_STATES,
   getChallongeParticipants,
   getChallongeTournament,
 } from "@/lib/challonge/client";
@@ -8,7 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export type FixAction =
   | { label: string; tab: string }
   | { label: string; href: string; external: true }
-  | { label: string; action: "sync_participants" };
+  | { label: string; action: "sync_participants" | "generate_matches" };
 
 export type PreflightCheck = {
   id: string;
@@ -24,15 +25,6 @@ export type PreflightResult = {
   ready_to_start: boolean;
   overall_status: "ready" | "attention" | "blocked";
 };
-
-/** Challonge states that mean the bracket has been started (verified via v2.1). */
-const CHALLONGE_STARTED_STATES = new Set([
-  "underway",
-  "group_stages_underway",
-  "group_stages_finalized",
-  "awaiting_review",
-  "complete",
-]);
 
 function pass(
   partial: Omit<PreflightCheck, "status">
@@ -378,7 +370,9 @@ export async function runPreflightChecks(
           severity: "red",
           title: "Matches generated",
           detail: "No matches in the database yet",
-          fix_action: { label: "Open matches", tab: "matches" },
+          fix_action: challongeId
+            ? { label: "Generate matches", action: "generate_matches" }
+            : { label: "Open matches", tab: "matches" },
         })
   );
 
