@@ -11,6 +11,7 @@ import { PreflightCard } from "@/components/preflight-card";
 import { SettingsTab } from "@/components/settings-tab";
 import { MatchesTab } from "@/components/matches-tab";
 import { SyncMatchesButton } from "@/components/sync-matches-button";
+import { TabletsTab } from "@/components/tablets-tab";
 import { requireTO } from "@/lib/auth/require-to";
 import { listCourts } from "@/lib/data/courts";
 import { listEntrants } from "@/lib/data/entrants";
@@ -35,6 +36,7 @@ const TABS = [
   { id: "players", label: "Players" },
   { id: "bracket", label: "Bracket" },
   { id: "courts", label: "Courts" },
+  { id: "tablets", label: "Tablets" },
   { id: "matches", label: "Matches" },
   { id: "settings", label: "Settings" },
 ] as const;
@@ -408,6 +410,11 @@ export default async function TournamentDetailPage({
           />
         ) : activeTab === "courts" ? (
           <CourtsTab initialCourts={courts} tournamentId={tournament.id} />
+        ) : activeTab === "tablets" ? (
+          <TabletsTab
+            initialCourts={courts}
+            tournament={{ id: tournament.id, name: tournament.name }}
+          />
         ) : activeTab === "matches" ? (
           <MatchesTab
             tournament={tournament}
