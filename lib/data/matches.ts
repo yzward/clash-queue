@@ -22,14 +22,24 @@
  */
 
 import {
+  ChallongeAuthError,
+  ChallongeMatchNotFoundError,
+  ChallongeMatchStateError,
+  ChallongeRateLimitError,
   ChallongeStartError,
   CHALLONGE_STARTED_STATES,
+  formatScoresForChallonge,
   getChallongeMatches,
   getChallongeTournament,
+  reportMatchResult,
   startTournament,
 } from "@/lib/challonge/client";
 import type { ChallongeMatch } from "@/lib/challonge/types";
 import { listCourts } from "@/lib/data/courts";
+import {
+  buildState,
+  computeEffectiveTotals,
+} from "@/lib/scoring/build-state";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type MatchRow = {
@@ -41,6 +51,8 @@ export type MatchRow = {
   stage: string | null;
   winner_id: string | null;
   challonge_match_id: string | null;
+  challonge_reported_at: string | null;
+  challonge_report_error: string | null;
   played_at: string | null;
   score1: number | null;
   score2: number | null;
@@ -82,6 +94,8 @@ export type MatchWithContext = {
     court_id: string | null;
     ref_id: string | null;
     winner_id: string | null;
+    challonge_reported_at: string | null;
+    challonge_report_error: string | null;
     updated_at: string | null;
     created_at: string | null;
   };
@@ -136,6 +150,10 @@ function mapMatchRow(row: Record<string, unknown>): MatchRow {
     stage: (row.stage as string | null) ?? null,
     winner_id: (row.winner_id as string | null) ?? null,
     challonge_match_id: (row.challonge_match_id as string | null) ?? null,
+    challonge_reported_at:
+      (row.challonge_reported_at as string | null) ?? null,
+    challonge_report_error:
+      (row.challonge_report_error as string | null) ?? null,
     played_at: (row.played_at as string | null) ?? null,
     score1: typeof row.score1 === "number" ? row.score1 : null,
     score2: typeof row.score2 === "number" ? row.score2 : null,
@@ -412,6 +430,8 @@ export async function listMatchesWithContext(
         court_id: match.court_id,
         ref_id: match.ref_id,
         winner_id: match.winner_id,
+        challonge_reported_at: match.challonge_reported_at,
+        challonge_report_error: match.challonge_report_error,
         updated_at: match.updated_at,
         created_at: match.created_at,
       },
@@ -1052,4 +1072,293 @@ export async function unassignRef(
     return { ok: false, error: "not_found", message: "Match not found after unassign" };
   }
   return { ok: true, match: ctx };
+}
+
+export type ChallongeReportOutcome =
+  | { attempted: false; skipped: true; reason: "not_linked" }
+  | { attempted: true; ok: true; scores: string }
+  | { attempted: true; ok: false; error: string };
+
+function challongeErrorMessage(err: unknown): string {
+  if (
+    err instanceof ChallongeMatchNotFoundError ||
+    err instanceof ChallongeMatchStateError ||
+    err instanceof ChallongeAuthError ||
+    err instanceof ChallongeRateLimitError
+  ) {
+    return err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return "Challonge report failed";
+}
+
+/**
+ * Report a locally-submitted match to Challonge (non-blocking for local truth).
+ * Skips silently when tournament/match lacks Challonge linkage.
+ */
+export async function reportSubmittedMatchToChallonge(
+  matchId: string
+): Promise<ChallongeReportOutcome> {
+  const admin = createAdminClient();
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select(
+      `
+      id,
+      status,
+      tournament_id,
+      challonge_match_id,
+      winner_id,
+      point_cap,
+      sets_to_win,
+      challonge_reported_at,
+      tournaments!matches_tournament_id_fkey(id, challonge_id)
+    `
+    )
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[matches:challongeReport] match", matchError);
+    return {
+      attempted: true,
+      ok: false,
+      error: `Failed to load match: ${matchError.message}`,
+    };
+  }
+  if (!match) {
+    return { attempted: true, ok: false, error: "Match not found" };
+  }
+
+  const tournamentRaw = match.tournaments as
+    | { id?: string; challonge_id?: string | null }
+    | { id?: string; challonge_id?: string | null }[]
+    | null;
+  const tournament = Array.isArray(tournamentRaw)
+    ? tournamentRaw[0]
+    : tournamentRaw;
+  const challongeId = tournament?.challonge_id
+    ? String(tournament.challonge_id)
+    : null;
+  const challongeMatchId = match.challonge_match_id
+    ? String(match.challonge_match_id)
+    : null;
+
+  if (!challongeId || !challongeMatchId) {
+    return { attempted: false, skipped: true, reason: "not_linked" };
+  }
+
+  const { data: mps, error: mpError } = await admin
+    .from("match_players")
+    .select("player_id, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true });
+
+  if (mpError || !mps || mps.length < 2) {
+    const msg = "Match needs two players to report to Challonge";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const p1Id = String(mps[0].player_id);
+  const p2Id = String(mps[1].player_id);
+  const tournamentId = String(match.tournament_id);
+
+  const { data: entrants, error: entrantError } = await admin
+    .from("tournament_entrants")
+    .select("player_id, startgg_entrant_id")
+    .eq("tournament_id", tournamentId)
+    .in("player_id", [p1Id, p2Id]);
+
+  if (entrantError) {
+    console.error("[matches:challongeReport] entrants", entrantError);
+    const msg = `Failed to resolve Challonge participants: ${entrantError.message}`;
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const entrantByPlayer = new Map(
+    (entrants ?? []).map((e) => [
+      String(e.player_id),
+      e.startgg_entrant_id != null ? String(e.startgg_entrant_id) : null,
+    ])
+  );
+  const p1Participant = entrantByPlayer.get(p1Id) ?? null;
+  const p2Participant = entrantByPlayer.get(p2Id) ?? null;
+  const winnerPlayerId = match.winner_id ? String(match.winner_id) : null;
+
+  if (!p1Participant || !p2Participant) {
+    const msg =
+      "Missing Challonge participant id (startgg_entrant_id) — sync gap";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+  if (!winnerPlayerId) {
+    const msg = "Match has no winner_id";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const winnerParticipant =
+    winnerPlayerId === p1Id
+      ? p1Participant
+      : winnerPlayerId === p2Id
+        ? p2Participant
+        : null;
+  if (!winnerParticipant) {
+    const msg = "Winner is not one of the match players";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const { data: events, error: eventsError } = await admin
+    .from("finish_events")
+    .select("id, scorer_player_id, finish_type, points, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (eventsError) {
+    console.error("[matches:challongeReport] events", eventsError);
+    const msg = `Failed to load finish events: ${eventsError.message}`;
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const pointCap =
+    typeof match.point_cap === "number" && match.point_cap > 0
+      ? match.point_cap
+      : 5;
+  const setsToWin =
+    typeof match.sets_to_win === "number" && match.sets_to_win > 0
+      ? match.sets_to_win
+      : 2;
+
+  const scoreEvents = (events ?? []).map((e) => ({
+    id: String(e.id),
+    scorer_player_id: String(e.scorer_player_id),
+    finish_type: String(e.finish_type),
+    points: typeof e.points === "number" ? e.points : 0,
+    created_at: (e.created_at as string | null) ?? null,
+  }));
+
+  const finalState = buildState(
+    scoreEvents,
+    p1Id,
+    pointCap,
+    setsToWin,
+    p2Id
+  );
+  if (!finalState.matchComplete || !finalState.winnerId) {
+    const msg = "Match not complete — cannot report to Challonge";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const totals = computeEffectiveTotals(
+    scoreEvents,
+    p1Id,
+    pointCap,
+    setsToWin
+  );
+  const perSetScores = totals.setBreakdown
+    .filter((row) => row.winner != null)
+    .map((row) => ({ p1: row.p1, p2: row.p2 }));
+
+  if (perSetScores.length === 0) {
+    const msg = "No completed sets to report";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+
+  const scoresDisplay = formatScoresForChallonge(perSetScores);
+
+  try {
+    await reportMatchResult(challongeId, challongeMatchId, {
+      winnerParticipantId: winnerParticipant,
+      player1ParticipantId: p1Participant,
+      player2ParticipantId: p2Participant,
+      perSetScores,
+    });
+
+    const now = new Date().toISOString();
+    await admin
+      .from("matches")
+      .update({
+        challonge_reported_at: now,
+        challonge_report_error: null,
+        updated_at: now,
+      })
+      .eq("id", matchId);
+
+    return { attempted: true, ok: true, scores: scoresDisplay };
+  } catch (err) {
+    const message = challongeErrorMessage(err);
+    console.error("[matches:challongeReport]", err);
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: message })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: message };
+  }
+}
+
+/**
+ * TO-triggered retry of Challonge report for a submitted match.
+ */
+export async function retryChallongeReport(
+  matchId: string
+): Promise<ChallongeReportOutcome> {
+  const admin = createAdminClient();
+  const { data: match, error } = await admin
+    .from("matches")
+    .select("id, status")
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[matches:retryChallonge]", error);
+    return {
+      attempted: true,
+      ok: false,
+      error: `Failed to load match: ${error.message}`,
+    };
+  }
+  if (!match) {
+    return { attempted: true, ok: false, error: "Match not found" };
+  }
+  if (String(match.status) !== "submitted") {
+    return {
+      attempted: true,
+      ok: false,
+      error: "Match must be submitted before Challonge report",
+    };
+  }
+
+  return reportSubmittedMatchToChallonge(matchId);
 }

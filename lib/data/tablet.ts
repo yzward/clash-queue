@@ -1,4 +1,5 @@
 import { listAvailableRefs, type AvailableRef } from "@/lib/data/players";
+import { reportSubmittedMatchToChallonge } from "@/lib/data/matches";
 import {
   buildState,
   computeEffectiveTotals,
@@ -655,7 +656,16 @@ export type RecordFinishResult =
   | { ok: false; reason: string };
 
 export type SubmitMatchResult =
-  | { ok: true; finalState: MatchScoreState }
+  | {
+      ok: true;
+      finalState: MatchScoreState;
+      challonge?: {
+        attempted: boolean;
+        ok: boolean;
+        error?: string;
+        scores?: string;
+      };
+    }
   | { ok: false; reason: "not_complete" | "not_found" | string };
 
 export async function grabMatchForScoring(
@@ -892,7 +902,7 @@ export async function recordFinishEvent(
 }
 
 /**
- * Local submit only — no Challonge / ranking writeback (10.a.3).
+ * Local submit + Challonge report (non-blocking). No ranking writeback.
  */
 export async function submitMatchResult(
   matchId: string,
@@ -903,7 +913,7 @@ export async function submitMatchResult(
   const { data: match, error: matchError } = await admin
     .from("matches")
     .select(
-      "id, status, court_id, point_cap, sets_to_win, winner_id"
+      "id, status, court_id, point_cap, sets_to_win, winner_id, challonge_reported_at"
     )
     .eq("id", matchId)
     .maybeSingle();
@@ -932,6 +942,13 @@ export async function submitMatchResult(
         ? match.sets_to_win
         : 2;
     const finalState = buildState(events, p1Id, pointCap, setsToWin, p2Id);
+
+    // Race: local already submitted — still try Challonge if never reported.
+    if (!match.challonge_reported_at) {
+      const challonge = await runChallongeReportPhase(matchId);
+      return { ok: true, finalState, challonge };
+    }
+
     return { ok: true, finalState };
   }
 
@@ -1020,5 +1037,23 @@ export async function submitMatchResult(
       .eq("current_match_id", matchId);
   }
 
-  return { ok: true, finalState };
+  // Challonge is downstream — never roll back local submit on failure.
+  const challonge = await runChallongeReportPhase(matchId);
+  return { ok: true, finalState, challonge };
+}
+
+async function runChallongeReportPhase(matchId: string): Promise<{
+  attempted: boolean;
+  ok: boolean;
+  error?: string;
+  scores?: string;
+}> {
+  const report = await reportSubmittedMatchToChallonge(matchId);
+  if (report.attempted === false) {
+    return { attempted: false, ok: true };
+  }
+  if (report.ok) {
+    return { attempted: true, ok: true, scores: report.scores };
+  }
+  return { attempted: true, ok: false, error: report.error };
 }

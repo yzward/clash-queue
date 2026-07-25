@@ -8,6 +8,7 @@ import {
   assignCourtAction,
   assignRefAction,
   listAvailableRefsAction,
+  retryChallongeReportAction,
   unassignCourtAction,
   unassignRefAction,
 } from "@/app/t/[id]/actions";
@@ -338,6 +339,100 @@ export function MatchDetailDrawer({
                   </div>
                 ) : null}
               </div>
+
+              {match.match.challonge_match_id &&
+              match.match.status === "submitted" ? (
+                <div
+                  className="space-y-2 rounded-xl px-3.5 py-3"
+                  style={{
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(255,255,255,0.06)",
+                  }}
+                >
+                  <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                    Challonge status
+                  </p>
+                  {match.match.challonge_reported_at ? (
+                    <p className="text-[12px] font-medium text-[#86efac]">
+                      Reported to Challonge at{" "}
+                      {new Date(
+                        match.match.challonge_reported_at
+                      ).toLocaleString()}
+                    </p>
+                  ) : match.match.challonge_report_error ? (
+                    <div className="space-y-2">
+                      <p className="text-[12px] font-medium text-amber-300">
+                        Challonge report failed:{" "}
+                        {match.match.challonge_report_error}
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={isPending}
+                        className="border border-amber-400/40 text-amber-200 hover:bg-amber-400/10"
+                        onClick={() => {
+                          startTransition(async () => {
+                            const result = await retryChallongeReportAction(
+                              match.match.id,
+                              tournamentId
+                            );
+                            if (!result.ok) {
+                              toast.error(result.error);
+                              onRefresh();
+                              return;
+                            }
+                            onMatchUpdated(result.match);
+                            toast.success(
+                              result.scores
+                                ? `Reported to Challonge (${result.scores})`
+                                : "Reported to Challonge"
+                            );
+                            onRefresh();
+                          });
+                        }}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-[12px] text-muted-foreground">
+                        Not reported to Challonge yet
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={isPending}
+                        className="border border-white/15"
+                        onClick={() => {
+                          startTransition(async () => {
+                            const result = await retryChallongeReportAction(
+                              match.match.id,
+                              tournamentId
+                            );
+                            if (!result.ok) {
+                              toast.error(result.error);
+                              onRefresh();
+                              return;
+                            }
+                            onMatchUpdated(result.match);
+                            toast.success(
+                              result.scores
+                                ? `Reported to Challonge (${result.scores})`
+                                : "Reported to Challonge"
+                            );
+                            onRefresh();
+                          });
+                        }}
+                      >
+                        Report now
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <SheetFooter className="border-t border-white/10 bg-[#0f0e16]">

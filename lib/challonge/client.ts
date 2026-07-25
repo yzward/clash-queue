@@ -16,9 +16,7 @@
  * - prerequisite_match_ids_csv is v1-only — absent from v2.1 MatchOutput
  * - URL slug (nl7udlbm) and numeric id both work in /tournaments/{id}.json paths
  *
- * Write shapes (2026-07-25, from Challonge v2.1 OpenAPI / Apidog; live write
- * verification blocked locally because CHALLONGE_API_KEY is Sensitive on Vercel
- * and `vercel env pull` returns an empty placeholder):
+ * Write shapes:
  * - POST /tournaments/{id}/participants.json
  *   body: { data: { type: "participant", attributes: { name, seed?, misc? } } }
  * - POST /tournaments/{id}/participants/bulk_add.json
@@ -27,6 +25,8 @@
  * - PUT /tournaments/{id}/change_state.json
  *   body: { data: { type: "TournamentState", attributes: { state: "start" | "start_group_stage" | ... } } }
  *   Use start_group_stage when group_stage_enabled; otherwise start.
+ * - PUT /tournaments/{id}/matches/{matchId}.json — see reportMatchResult() header
+ *   (live-verified 2026-07-26 on Open Division Test nl7udlbm).
  */
 
 import type {
@@ -73,6 +73,62 @@ export class ChallongeStartError extends Error {
     super(message);
     this.name = "ChallongeStartError";
     this.status = status;
+    this.body = body ?? null;
+  }
+}
+
+export class ChallongeMatchNotFoundError extends Error {
+  readonly code = "CHALLONGE_MATCH_NOT_FOUND" as const;
+  status = 404;
+  body: unknown;
+
+  constructor(
+    message = "Match not found on Challonge — sync gap?",
+    body?: unknown
+  ) {
+    super(message);
+    this.name = "ChallongeMatchNotFoundError";
+    this.body = body ?? null;
+  }
+}
+
+export class ChallongeMatchStateError extends Error {
+  readonly code = "CHALLONGE_MATCH_STATE" as const;
+  status: number;
+  body: unknown;
+
+  constructor(
+    message = "Match state prevents reporting",
+    status = 422,
+    body?: unknown
+  ) {
+    super(message);
+    this.name = "ChallongeMatchStateError";
+    this.status = status;
+    this.body = body ?? null;
+  }
+}
+
+export class ChallongeAuthError extends Error {
+  readonly code = "CHALLONGE_AUTH" as const;
+  status = 401;
+  body: unknown;
+
+  constructor(message = "API key rejected", body?: unknown) {
+    super(message);
+    this.name = "ChallongeAuthError";
+    this.body = body ?? null;
+  }
+}
+
+export class ChallongeRateLimitError extends Error {
+  readonly code = "CHALLONGE_RATE_LIMIT" as const;
+  status = 429;
+  body: unknown;
+
+  constructor(message = "Rate limit exceeded — retry", body?: unknown) {
+    super(message);
+    this.name = "ChallongeRateLimitError";
     this.body = body ?? null;
   }
 }
@@ -719,4 +775,194 @@ export async function pushParticipantsBulk(
   }
 
   return created;
+}
+
+/**
+ * Format per-set scores for Challonge's display string (attributes.scores).
+ * Uses " - " separator with spaces, comma-separated sets.
+ * Example: [{p1:5,p2:3},{p1:5,p2:1}] → "5 - 3, 5 - 1"
+ *
+ * NOTE: This string alone is NOT accepted as a write payload on v2.1
+ * (see reportMatchResult). Kept for logging / UI parity with MatchOutput.
+ */
+export function formatScoresForChallonge(
+  perSetScores: Array<{ p1: number; p2: number }>
+): string {
+  return perSetScores.map((s) => `${s.p1} - ${s.p2}`).join(", ");
+}
+
+export type ReportMatchResultInput = {
+  winnerParticipantId: string;
+  /** Local P1 Challonge participant id (startgg_entrant_id). */
+  player1ParticipantId: string;
+  /** Local P2 Challonge participant id (startgg_entrant_id). */
+  player2ParticipantId: string;
+  /** Per-set point totals in local P1/P2 order (from computeEffectiveTotals). */
+  perSetScores: Array<{ p1: number; p2: number }>;
+};
+
+/**
+ * Report a match result to Challonge v2.1.
+ *
+ * Confirmed live 2026-07-26 against Open Division Test (nl7udlbm / 18249513):
+ *
+ *   PUT /v2.1/tournaments/{tournament_id}/matches/{match_id}.json
+ *   Content-Type: application/vnd.api+json
+ *
+ *   Body (OpenAPI MatchInput — THIS is the shape that actually applies):
+ *   {
+ *     "data": {
+ *       "type": "match",
+ *       "attributes": {
+ *         "match": [
+ *           { "participant_id": "<p1>", "score_set": "2", "rank": 1, "advancing": true },
+ *           { "participant_id": "<p2>", "score_set": "0", "rank": 2, "advancing": false }
+ *         ]
+ *       }
+ *     }
+ *   }
+ *
+ * - score_set = comma-separated THIS participant's score per set
+ *   e.g. sets [{p1:5,p2:3},{p1:5,p2:1}] → p1 "5,5", p2 "3,1"
+ * - Response attributes.scores becomes display form "5 - 3, 5 - 1"
+ *
+ * REJECTED shape (returns HTTP 200 but leaves match open / scores "0 - 0"):
+ *   { data: { type: "Match", attributes: { winner_id, scores: "2 - 0" } } }
+ *
+ * Already-complete matches: GET state === "complete" → ChallongeMatchStateError
+ * (re-PUT is actually idempotent 200, but we refuse so TOs see a clear signal).
+ */
+export async function reportMatchResult(
+  challongeId: string,
+  challongeMatchId: string,
+  input: ReportMatchResultInput
+): Promise<ChallongeMatch> {
+  const path = `/tournaments/${encodeURIComponent(challongeId)}/matches/${encodeURIComponent(challongeMatchId)}.json`;
+
+  let current: ChallongeMatch;
+  try {
+    const doc = await challongeRequest<JsonApiDocument>(path);
+    if (!doc.data || Array.isArray(doc.data)) {
+      throw new ChallongeMatchNotFoundError();
+    }
+    current = normaliseMatch(doc.data);
+  } catch (err) {
+    if (err instanceof ChallongeMatchNotFoundError) throw err;
+    if (err instanceof ChallongeError) {
+      if (err.status === 401 || err.status === 403) {
+        throw new ChallongeAuthError("API key rejected", err.body);
+      }
+      if (err.status === 404) {
+        throw new ChallongeMatchNotFoundError(
+          "Match not found on Challonge — sync gap?",
+          err.body
+        );
+      }
+      if (err.status === 429) {
+        throw new ChallongeRateLimitError("Rate limit exceeded — retry", err.body);
+      }
+    }
+    throw err;
+  }
+
+  if (current.state === "complete") {
+    throw new ChallongeMatchStateError(
+      "Match state prevents reporting (already reported)",
+      422,
+      { state: current.state, winner_id: current.winner_id, scores: current.scores }
+    );
+  }
+
+  if (current.state !== "open") {
+    throw new ChallongeMatchStateError(
+      `Match state prevents reporting (state: ${current.state || "unknown"})`,
+      422,
+      { state: current.state }
+    );
+  }
+
+  const p1Set = input.perSetScores.map((s) => s.p1).join(",");
+  const p2Set = input.perSetScores.map((s) => s.p2).join(",");
+  const winner = String(input.winnerParticipantId);
+  const p1Id = String(input.player1ParticipantId);
+  const p2Id = String(input.player2ParticipantId);
+
+  const body = {
+    data: {
+      type: "match",
+      attributes: {
+        match: [
+          {
+            participant_id: p1Id,
+            score_set: p1Set || "0",
+            rank: winner === p1Id ? 1 : 2,
+            advancing: winner === p1Id,
+          },
+          {
+            participant_id: p2Id,
+            score_set: p2Set || "0",
+            rank: winner === p2Id ? 1 : 2,
+            advancing: winner === p2Id,
+          },
+        ],
+      },
+    },
+  };
+
+  try {
+    const doc = await challongeRequest<JsonApiDocument>(path, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+
+    if (!doc.data || Array.isArray(doc.data)) {
+      return getChallongeMatch(challongeId, challongeMatchId);
+    }
+    return normaliseMatch(doc.data);
+  } catch (err) {
+    if (err instanceof ChallongeError) {
+      if (err.status === 401 || err.status === 403) {
+        throw new ChallongeAuthError("API key rejected", err.body);
+      }
+      if (err.status === 404) {
+        throw new ChallongeMatchNotFoundError(
+          "Match not found on Challonge — sync gap?",
+          err.body
+        );
+      }
+      if (err.status === 429) {
+        throw new ChallongeRateLimitError("Rate limit exceeded — retry", err.body);
+      }
+      if (err.status === 400 || err.status === 422) {
+        throw new ChallongeMatchStateError(
+          extractMatchReportErrorMessage(err),
+          err.status,
+          err.body
+        );
+      }
+    }
+    throw err;
+  }
+}
+
+export async function getChallongeMatch(
+  challongeId: string,
+  challongeMatchId: string
+): Promise<ChallongeMatch> {
+  const doc = await challongeRequest<JsonApiDocument>(
+    `/tournaments/${encodeURIComponent(challongeId)}/matches/${encodeURIComponent(challongeMatchId)}.json`
+  );
+  if (!doc.data || Array.isArray(doc.data)) {
+    throw new ChallongeMatchNotFoundError();
+  }
+  return normaliseMatch(doc.data);
+}
+
+function extractMatchReportErrorMessage(err: ChallongeError): string {
+  const doc = err.body as JsonApiDocument | null;
+  const detail =
+    doc?.errors?.[0]?.detail ||
+    doc?.errors?.[0]?.title ||
+    err.message.replace(/^Challonge \d+:\s*/, "");
+  return detail || "Match state prevents reporting";
 }

@@ -48,6 +48,7 @@ import {
   generateMatchesFromChallonge,
   getCourtStatuses,
   listMatchesWithContext,
+  retryChallongeReport,
   reassignCourt,
   startAndGenerateMatches,
   unassignCourt,
@@ -1123,5 +1124,50 @@ export async function unlinkChallongeAction(
     const message =
       err instanceof Error ? err.message : "Failed to unlink Challonge";
     return { ok: false, error: "unknown", message };
+  }
+}
+
+export type RetryChallongeReportActionResult =
+  | { ok: true; scores?: string; match: MatchWithContext }
+  | { ok: false; error: string };
+
+export async function retryChallongeReportAction(
+  matchId: string,
+  tournamentId: string
+): Promise<RetryChallongeReportActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const result = await retryChallongeReport(matchId);
+    if (result.attempted === false) {
+      return { ok: false, error: "Match is not linked to Challonge" };
+    }
+    if (!result.ok) {
+      const rows = await listMatchesWithContext(tournamentId);
+      const match = rows.find((r) => r.match.id === matchId);
+      if (match) {
+        // Still refresh drawer with error field from DB
+        return { ok: false, error: result.error };
+      }
+      return { ok: false, error: result.error };
+    }
+
+    revalidatePath(`/t/${tournamentId}`);
+    const rows = await listMatchesWithContext(tournamentId);
+    const match = rows.find((r) => r.match.id === matchId);
+    if (!match) {
+      return { ok: false, error: "Match not found after report" };
+    }
+    return { ok: true, scores: result.scores, match };
+  } catch (err) {
+    console.error("[retryChallongeReportAction]", err);
+    return {
+      ok: false,
+      error:
+        err instanceof Error ? err.message : "Failed to retry Challonge report",
+    };
   }
 }

@@ -270,3 +270,28 @@ export async function submitMatchResultAction(
     };
   }
 }
+
+export async function retryChallongeReportAction(
+  matchId: string,
+  _actorRefPlayerId: string
+): Promise<
+  | { ok: true; scores?: string }
+  | { ok: false; error: string; skipped?: boolean }
+> {
+  try {
+    const { retryChallongeReport } = await import("@/lib/data/matches");
+    // Dynamic import avoids circular tablet↔matches load during module init.
+    const result = await retryChallongeReport(matchId);
+    if (result.attempted === false) {
+      return { ok: false, error: "Match is not linked to Challonge", skipped: true };
+    }
+    if (result.ok) return { ok: true, scores: result.scores };
+    return { ok: false, error: result.error };
+  } catch (err) {
+    console.error("[retryChallongeReportAction]", err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Failed to retry Challonge report",
+    };
+  }
+}

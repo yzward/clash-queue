@@ -282,6 +282,15 @@ export function TabletScorer({
           ...matchCtx,
           match: { ...matchCtx.match, status: "submitted" },
         });
+        if (
+          result.challonge?.attempted &&
+          result.challonge.ok === false &&
+          result.challonge.error
+        ) {
+          toast.error(`Challonge report failed: ${result.challonge.error}`, {
+            duration: 8000,
+          });
+        }
       }
     );
   }, [
