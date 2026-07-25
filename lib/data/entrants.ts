@@ -260,6 +260,151 @@ export async function addEntrantManual(
   return insertManualEntrant(tournamentId, player.id, confirmedByPlayerId);
 }
 
+export type BulkAddEntrantsResult = {
+  added: number;
+  skipped: number;
+  skipped_names: string[];
+  errors: Array<{ playerId: string; reason: string }>;
+  entrants: Entrant[];
+};
+
+export async function addEntrantsBulk(
+  tournamentId: string,
+  playerIds: string[],
+  confirmedByPlayerId: string
+): Promise<BulkAddEntrantsResult> {
+  const admin = createAdminClient();
+  const uniqueIds = [...new Set(playerIds.map((id) => id.trim()).filter(Boolean))];
+
+  const result: BulkAddEntrantsResult = {
+    added: 0,
+    skipped: 0,
+    skipped_names: [],
+    errors: [],
+    entrants: [],
+  };
+
+  if (uniqueIds.length === 0) {
+    return result;
+  }
+
+  const { data: existingRows, error: existingError } = await admin
+    .from("tournament_entrants")
+    .select("player_id")
+    .eq("tournament_id", tournamentId)
+    .in("player_id", uniqueIds);
+
+  if (existingError) {
+    console.error("[entrants:bulk] existing lookup", existingError);
+    throw new Error(
+      `Failed to check existing entrants: ${existingError.message}`
+    );
+  }
+
+  const alreadyRegistered = new Set(
+    (existingRows ?? [])
+      .map((row) => row.player_id as string | null)
+      .filter((id): id is string => Boolean(id))
+  );
+
+  const { data: playerRows, error: playersError } = await admin
+    .from("players")
+    .select("id, display_name")
+    .in("id", uniqueIds)
+    .is("deleted_at", null);
+
+  if (playersError) {
+    console.error("[entrants:bulk] players lookup", playersError);
+    throw new Error(`Failed to load players: ${playersError.message}`);
+  }
+
+  const playerById = new Map(
+    (playerRows ?? []).map((row) => [
+      String(row.id),
+      {
+        id: String(row.id),
+        display_name: String(row.display_name ?? ""),
+      },
+    ])
+  );
+
+  const toInsert: string[] = [];
+
+  for (const playerId of uniqueIds) {
+    if (alreadyRegistered.has(playerId)) {
+      result.skipped++;
+      const name = playerById.get(playerId)?.display_name;
+      if (name) result.skipped_names.push(name);
+      continue;
+    }
+    if (!playerById.has(playerId)) {
+      result.errors.push({ playerId, reason: "Player not found" });
+      continue;
+    }
+    toInsert.push(playerId);
+  }
+
+  if (toInsert.length === 0) {
+    return result;
+  }
+
+  const now = new Date().toISOString();
+  const rows = toInsert.map((playerId) => ({
+    tournament_id: tournamentId,
+    player_id: playerId,
+    entrant_status: "confirmed",
+    status: "registered",
+    confirmed_by: confirmedByPlayerId,
+    confirmed_at: now,
+    registration_source: "manual",
+    display_name: playerById.get(playerId)?.display_name ?? null,
+  }));
+
+  const { data: inserted, error: insertError } = await admin
+    .from("tournament_entrants")
+    .insert(rows)
+    .select(ENTRANT_SELECT);
+
+  if (insertError) {
+    console.error("[entrants:bulk] insert", insertError);
+    // Unique violation mid-batch: fall back to per-row inserts so partial work is kept.
+    if (insertError.code === "23505") {
+      for (const playerId of toInsert) {
+        try {
+          const entrant = await insertManualEntrant(
+            tournamentId,
+            playerId,
+            confirmedByPlayerId
+          );
+          result.added++;
+          result.entrants.push(entrant);
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : "Failed to add entrant";
+          if (message.toLowerCase().includes("already entered")) {
+            result.skipped++;
+            const name = playerById.get(playerId)?.display_name;
+            if (name) result.skipped_names.push(name);
+          } else {
+            console.error("[entrants:bulk]", playerId, err);
+            result.errors.push({ playerId, reason: message });
+          }
+        }
+      }
+      return result;
+    }
+
+    throw new Error(`Failed to bulk add entrants: ${insertError.message}`);
+  }
+
+  const mapped = ((inserted ?? []) as Record<string, unknown>[]).map(
+    mapEntrantRow
+  );
+  result.added = mapped.length;
+  result.entrants = mapped;
+  return result;
+}
+
 export async function updateEntrantStatus(
   entrantId: string,
   entrantStatus: "confirmed" | "pending"

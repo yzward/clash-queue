@@ -12,17 +12,21 @@ import {
 import {
   addEntrantByPlayerId,
   addEntrantManual,
+  addEntrantsBulk,
   EntrantInMatchError,
   getEntrantsNeedingPush,
   setEntrantChallongeId,
   syncEntrantIdsFromChallonge,
+  type BulkAddEntrantsResult,
   type ChallongeIdSyncResult,
   type Entrant,
   updateEntrantStatus,
   withdrawEntrant,
 } from "@/lib/data/entrants";
 import {
+  listPlayersForBulkPicker,
   searchPlayers,
+  type BulkPickerPlayer,
   type PlayerSearchResult,
 } from "@/lib/data/players";
 import {
@@ -62,6 +66,16 @@ export type AddEntrantResult =
 
 export type SearchPlayersResult =
   | { ok: true; players: PlayerSearchResult[] }
+  | { ok: false; error: string };
+
+export type BulkPickerResult =
+  | { ok: true; players: BulkPickerPlayer[] }
+  | { ok: false; error: string };
+
+export type BulkAddEntrantsActionResult =
+  | ({ ok: true } & Omit<BulkAddEntrantsResult, "entrants"> & {
+      entrants: Entrant[];
+    })
   | { ok: false; error: string };
 
 export type ImportHumanitixResult =
@@ -211,6 +225,68 @@ export async function searchPlayersAction(
     const message =
       err instanceof Error ? err.message : "Player search failed";
     console.error("[searchPlayersAction]", err);
+    return { ok: false, error: message };
+  }
+}
+
+export async function listPlayersForBulkPickerAction(
+  tournamentId: string,
+  query: string
+): Promise<BulkPickerResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const players = await listPlayersForBulkPicker(tournamentId, query);
+    return { ok: true, players };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to load players";
+    console.error("[listPlayersForBulkPickerAction]", err);
+    return { ok: false, error: message };
+  }
+}
+
+export async function bulkAddEntrantsAction(
+  tournamentId: string,
+  playerIds: string[]
+): Promise<BulkAddEntrantsActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  if (!Array.isArray(playerIds) || playerIds.length === 0) {
+    return { ok: false, error: "Select at least one player" };
+  }
+  if (playerIds.length > 100) {
+    return { ok: false, error: "You can add at most 100 players at once" };
+  }
+  if (!playerIds.every((id) => typeof id === "string" && id.trim())) {
+    return { ok: false, error: "Invalid player selection" };
+  }
+
+  try {
+    const result = await addEntrantsBulk(
+      tournamentId,
+      playerIds,
+      auth.playerId
+    );
+    revalidatePath(`/t/${tournamentId}`);
+    return {
+      ok: true,
+      added: result.added,
+      skipped: result.skipped,
+      skipped_names: result.skipped_names,
+      errors: result.errors,
+      entrants: result.entrants,
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to bulk add players";
+    console.error("[bulkAddEntrantsAction]", err);
     return { ok: false, error: message };
   }
 }

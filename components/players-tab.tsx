@@ -19,6 +19,7 @@ import {
   type SyncFromChallongeResult,
 } from "@/app/t/[id]/actions";
 import { AddPlayerDialog } from "@/components/add-player-dialog";
+import { BulkAddDialog } from "@/components/bulk-add-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -39,6 +40,7 @@ import type { Entrant } from "@/lib/data/entrants";
 
 type OptimisticUpdate =
   | { type: "add"; entrant: Entrant }
+  | { type: "addMany"; entrants: Entrant[] }
   | { type: "confirm"; entrantId: string }
   | { type: "withdraw"; entrantId: string };
 
@@ -49,6 +51,13 @@ function applyOptimisticUpdate(
   switch (update.type) {
     case "add":
       return [...state, update.entrant];
+    case "addMany": {
+      const existing = new Set(state.map((row) => row.id));
+      return [
+        ...state,
+        ...update.entrants.filter((row) => !existing.has(row.id)),
+      ];
+    }
     case "confirm":
       return state.map((row) =>
         row.id === update.entrantId
@@ -253,6 +262,7 @@ export function PlayersTab({
 }) {
   const challongeLinked = Boolean(challongeId);
   const [addOpen, setAddOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   const [withdrawTarget, setWithdrawTarget] = useState<Entrant | null>(null);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
@@ -306,6 +316,13 @@ export function PlayersTab({
   const handleAddSuccess = (entrant: Entrant) => {
     startTransition(() => {
       applyOptimistic({ type: "add", entrant });
+    });
+  };
+
+  const handleBulkSuccess = (entrants: Entrant[]) => {
+    if (entrants.length === 0) return;
+    startTransition(() => {
+      applyOptimistic({ type: "addMany", entrants });
     });
   };
 
@@ -402,6 +419,16 @@ export function PlayersTab({
             Import from Humanitix
           </Button>
 
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setBulkOpen(true)}
+            style={{ borderColor: "rgba(255,255,255,0.15)" }}
+          >
+            Bulk add
+          </Button>
+
           {challongeLinked ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -486,6 +513,13 @@ export function PlayersTab({
         onOpenChange={setAddOpen}
         tournamentId={tournamentId}
         onSuccess={handleAddSuccess}
+      />
+
+      <BulkAddDialog
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        tournamentId={tournamentId}
+        onSuccess={handleBulkSuccess}
       />
 
       <Dialog
