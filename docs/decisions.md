@@ -125,3 +125,13 @@ If Clash Queue ends up being considered as ABO's platform:
 **Why:** These rules exist so the pivot decision isn't made under time pressure at the wrong moment. Both rules are guardrails to prevent late-August enthusiasm from overriding better judgement.
 
 ---
+
+## 2026-07-24 — Deferred: live-tournament-with-failing-preflight warning
+
+**Decision:** Fix A (warning banner when a live tournament has failing red pre-flight checks) is deferred. It's a real safety net for a known event-day failure mode, but not scoped for the current build sprint.
+
+**Why parked:** Event-day critical path (Matches tab, tablet scoring, Start Tournament lifecycle) takes precedence. Fix A is a non-destructive nice-to-have; the real fix is Step 10's Start Tournament gating that makes activation-without-preflight structurally impossible in the first place.
+
+**Reconsider when:** After Step 10 lifecycle gating is in. If TOs can still reach the drifted state via edge cases (Challonge auto-activation, manual DB updates), ship Fix A as a safety net.
+
+---
