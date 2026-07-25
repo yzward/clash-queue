@@ -829,8 +829,10 @@ export type ReportMatchResultInput = {
  * REJECTED shape (returns HTTP 200 but leaves match open / scores "0 - 0"):
  *   { data: { type: "Match", attributes: { winner_id, scores: "2 - 0" } } }
  *
- * Already-complete matches: GET state === "complete" → ChallongeMatchStateError
- * (re-PUT is actually idempotent 200, but we refuse so TOs see a clear signal).
+ * Already-complete matches (idempotent):
+ * - GET state === "complete" with matching winner_id → return match (success)
+ * - GET state === "complete" with different winner_id → ChallongeMatchStateError (conflict)
+ * - PUT 422 "already…" → re-GET and apply the same winner check
  */
 export async function reportMatchResult(
   challongeId: string,
@@ -838,14 +840,11 @@ export async function reportMatchResult(
   input: ReportMatchResultInput
 ): Promise<ChallongeMatch> {
   const path = `/tournaments/${encodeURIComponent(challongeId)}/matches/${encodeURIComponent(challongeMatchId)}.json`;
+  const expectedWinner = String(input.winnerParticipantId);
 
   let current: ChallongeMatch;
   try {
-    const doc = await challongeRequest<JsonApiDocument>(path);
-    if (!doc.data || Array.isArray(doc.data)) {
-      throw new ChallongeMatchNotFoundError();
-    }
-    current = normaliseMatch(doc.data);
+    current = await getChallongeMatch(challongeId, challongeMatchId);
   } catch (err) {
     if (err instanceof ChallongeMatchNotFoundError) throw err;
     if (err instanceof ChallongeError) {
@@ -866,11 +865,7 @@ export async function reportMatchResult(
   }
 
   if (current.state === "complete") {
-    throw new ChallongeMatchStateError(
-      "Match state prevents reporting (already reported)",
-      422,
-      { state: current.state, winner_id: current.winner_id, scores: current.scores }
-    );
+    return resolveAlreadyCompleteMatch(current, expectedWinner);
   }
 
   if (current.state !== "open") {
@@ -883,7 +878,6 @@ export async function reportMatchResult(
 
   const p1Set = input.perSetScores.map((s) => s.p1).join(",");
   const p2Set = input.perSetScores.map((s) => s.p2).join(",");
-  const winner = String(input.winnerParticipantId);
   const p1Id = String(input.player1ParticipantId);
   const p2Id = String(input.player2ParticipantId);
 
@@ -895,14 +889,14 @@ export async function reportMatchResult(
           {
             participant_id: p1Id,
             score_set: p1Set || "0",
-            rank: winner === p1Id ? 1 : 2,
-            advancing: winner === p1Id,
+            rank: expectedWinner === p1Id ? 1 : 2,
+            advancing: expectedWinner === p1Id,
           },
           {
             participant_id: p2Id,
             score_set: p2Set || "0",
-            rank: winner === p2Id ? 1 : 2,
-            advancing: winner === p2Id,
+            rank: expectedWinner === p2Id ? 1 : 2,
+            advancing: expectedWinner === p2Id,
           },
         ],
       },
@@ -934,15 +928,56 @@ export async function reportMatchResult(
         throw new ChallongeRateLimitError("Rate limit exceeded — retry", err.body);
       }
       if (err.status === 400 || err.status === 422) {
-        throw new ChallongeMatchStateError(
-          extractMatchReportErrorMessage(err),
-          err.status,
-          err.body
-        );
+        const detail = extractMatchReportErrorMessage(err);
+        if (isAlreadyReportedMessage(detail)) {
+          const latest = await getChallongeMatch(challongeId, challongeMatchId);
+          if (latest.state === "complete") {
+            return resolveAlreadyCompleteMatch(latest, expectedWinner);
+          }
+        }
+        throw new ChallongeMatchStateError(detail, err.status, err.body);
       }
     }
     throw err;
   }
+}
+
+function isAlreadyReportedMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("already") ||
+    lower.includes("complete") ||
+    lower.includes("reported")
+  );
+}
+
+/**
+ * Idempotent success when Challonge winner matches ours; conflict otherwise.
+ * `body.challonge_winner_id` is set on conflict for caller name resolution.
+ */
+function resolveAlreadyCompleteMatch(
+  current: ChallongeMatch,
+  expectedWinnerParticipantId: string
+): ChallongeMatch {
+  const remoteWinner =
+    current.winner_id == null ? null : String(current.winner_id);
+  if (remoteWinner && remoteWinner === String(expectedWinnerParticipantId)) {
+    return current;
+  }
+  throw new ChallongeMatchStateError(
+    remoteWinner
+      ? `Challonge already has a different result for this match (winner participant: ${remoteWinner}). Manual review needed.`
+      : "Challonge match is complete but has no winner — manual review needed.",
+    422,
+    {
+      state: current.state,
+      winner_id: current.winner_id,
+      scores: current.scores,
+      challonge_winner_id: remoteWinner,
+      expected_winner_id: expectedWinnerParticipantId,
+      conflict: true,
+    }
+  );
 }
 
 export async function getChallongeMatch(

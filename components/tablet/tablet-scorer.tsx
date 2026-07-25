@@ -105,6 +105,9 @@ export function TabletScorer({
   const [showSummary, setShowSummary] = useState(
     String(matchCtx.match.status) === "submitted"
   );
+  const [syncToHint, setSyncToHint] = useState<{
+    stage: string | null;
+  } | null>(null);
 
   const [optimisticEvents, addOptimistic] = useOptimistic(
     events,
@@ -283,6 +286,12 @@ export function TabletScorer({
           match: { ...matchCtx.match, status: "submitted" },
         });
         if (
+          result.roundComplete &&
+          result.newMatchesAvailable
+        ) {
+          setSyncToHint({ stage: result.stage ?? null });
+        }
+        if (
           result.challonge?.attempted &&
           result.challonge.ok === false &&
           result.challonge.error
@@ -434,6 +443,14 @@ export function TabletScorer({
             fouls={state.foulsBy2}
           />
         </div>
+
+        {syncToHint ? (
+          <p className="mt-4 max-w-sm text-[12px] text-muted-foreground">
+            {syncToHint.stage
+              ? `${syncToHint.stage} complete — ask your TO to sync new matches.`
+              : "Round complete — ask your TO to sync new matches."}
+          </p>
+        ) : null}
 
         <Button
           type="button"

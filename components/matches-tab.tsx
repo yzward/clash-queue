@@ -14,8 +14,10 @@ import { toast } from "sonner";
 
 import {
   assignCourtAction,
+  checkNewMatchesAvailableAction,
   reassignCourtAction,
   refreshMatchesTabAction,
+  syncMatchesAction,
   unassignCourtAction,
 } from "@/app/t/[id]/actions";
 import { MatchDetailDrawer } from "@/components/match-detail-drawer";
@@ -416,6 +418,8 @@ export function MatchesTab({
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [newMatchesAvailable, setNewMatchesAvailable] = useState(false);
+  const [syncPending, setSyncPending] = useState(false);
   const [, startTransition] = useTransition();
 
   const matches = optimistic.matches;
@@ -453,17 +457,33 @@ export function MatchesTab({
     return groups;
   }, [matches]);
 
+  const checkNewMatches = useEffectEvent(async () => {
+    if (!tournament.challonge_id) {
+      setNewMatchesAvailable(false);
+      return;
+    }
+    const result = await checkNewMatchesAvailableAction(tournament.id);
+    if (result.ok) {
+      setNewMatchesAvailable(result.available);
+    }
+  });
+
   const refresh = useEffectEvent(() => {
     startTransition(async () => {
       const result = await refreshMatchesTabAction(tournament.id);
       if (!result.ok) return;
       setBase({ matches: result.matches, courts: result.courts });
+      await checkNewMatches();
     });
   });
 
   useEffect(() => {
     setBase({ matches: initialMatches, courts: initialCourts });
   }, [initialMatches, initialCourts]);
+
+  useEffect(() => {
+    void checkNewMatches();
+  }, [tournament.id, tournament.challonge_id]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -612,9 +632,57 @@ export function MatchesTab({
     });
   }
 
+  function handleSyncFromBanner() {
+    setSyncPending(true);
+    startTransition(async () => {
+      const result = await syncMatchesAction(tournament.id);
+      setSyncPending(false);
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      if (result.generated > 0) {
+        toast.success(
+          `Added ${result.generated} new match${result.generated === 1 ? "" : "es"}`
+        );
+      } else {
+        toast.success("All matches up to date, no new matches");
+      }
+      if (result.errors.length > 0) {
+        toast.error(
+          `${result.errors.length} match${result.errors.length === 1 ? "" : "es"} failed to sync`
+        );
+      }
+      refresh();
+    });
+  }
+
   return (
     <TooltipProvider>
       <div className="space-y-6">
+        {newMatchesAvailable ? (
+          <div
+            className="flex flex-col gap-3 rounded-[10px] px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+            style={{
+              background: "rgba(167, 139, 250, 0.1)",
+              border: "1px solid rgba(167, 139, 250, 0.35)",
+            }}
+          >
+            <p className="text-[12px] font-medium text-white/90">
+              New matches may be available on Challonge.
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              disabled={syncPending}
+              onClick={handleSyncFromBanner}
+              className="h-8 shrink-0 bg-[#a78bfa] px-3 text-[10px] font-black uppercase tracking-widest text-[#0a0a12] hover:bg-[#b79afc]"
+            >
+              Sync now
+            </Button>
+          </div>
+        ) : null}
+
         <section>
           <SectionLabel>◆ Courts · {courts.length}</SectionLabel>
           {courts.length === 0 ? (

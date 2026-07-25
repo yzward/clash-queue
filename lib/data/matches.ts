@@ -1318,7 +1318,18 @@ export async function reportSubmittedMatchToChallonge(
 
     return { attempted: true, ok: true, scores: scoresDisplay };
   } catch (err) {
-    const message = challongeErrorMessage(err);
+    let message = challongeErrorMessage(err);
+    if (err instanceof ChallongeMatchStateError) {
+      const body = err.body as { conflict?: boolean; challonge_winner_id?: string } | null;
+      if (body?.conflict && body.challonge_winner_id) {
+        const otherName = await resolveParticipantDisplayName(
+          admin,
+          tournamentId,
+          String(body.challonge_winner_id)
+        );
+        message = `Challonge already has a different result for this match (winner: ${otherName}). Manual review needed.`;
+      }
+    }
     console.error("[matches:challongeReport]", err);
     await admin
       .from("matches")
@@ -1326,6 +1337,29 @@ export async function reportSubmittedMatchToChallonge(
       .eq("id", matchId);
     return { attempted: true, ok: false, error: message };
   }
+}
+
+async function resolveParticipantDisplayName(
+  admin: ReturnType<typeof createAdminClient>,
+  tournamentId: string,
+  challongeParticipantId: string
+): Promise<string> {
+  const { data: entrant } = await admin
+    .from("tournament_entrants")
+    .select("player_id, players!tournament_entrants_player_id_fkey(display_name)")
+    .eq("tournament_id", tournamentId)
+    .eq("startgg_entrant_id", challongeParticipantId)
+    .maybeSingle();
+
+  if (!entrant) return `participant ${challongeParticipantId}`;
+  const playersRaw = entrant.players as
+    | { display_name?: string }
+    | { display_name?: string }[]
+    | null;
+  const player = Array.isArray(playersRaw) ? playersRaw[0] : playersRaw;
+  return player?.display_name
+    ? String(player.display_name)
+    : `participant ${challongeParticipantId}`;
 }
 
 /**
@@ -1361,4 +1395,125 @@ export async function retryChallongeReport(
   }
 
   return reportSubmittedMatchToChallonge(matchId);
+}
+
+/**
+ * True when every local match in `stage` (e.g. "Round 1") is status=submitted.
+ */
+export async function checkRoundComplete(
+  tournamentId: string,
+  stage: string
+): Promise<boolean> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("matches")
+    .select("id, status")
+    .eq("tournament_id", tournamentId)
+    .eq("stage", stage);
+
+  if (error) {
+    console.error("[matches:checkRoundComplete]", error);
+    throw new Error(`Failed to check round: ${error.message}`);
+  }
+  const rows = data ?? [];
+  if (rows.length === 0) return false;
+  return rows.every((r) => String(r.status) === "submitted");
+}
+
+/**
+ * Lightweight: Challonge has more two-player matches than we store locally.
+ * Does not insert — TO must Sync matches.
+ */
+export async function checkNewMatchesAvailable(
+  tournamentId: string,
+  challongeId: string
+): Promise<boolean> {
+  const admin = createAdminClient();
+
+  const [{ count, error: countError }, challongeMatches] = await Promise.all([
+    admin
+      .from("matches")
+      .select("id", { count: "exact", head: true })
+      .eq("tournament_id", tournamentId)
+      .not("challonge_match_id", "is", null),
+    getChallongeMatches(challongeId),
+  ]);
+
+  if (countError) {
+    console.error("[matches:checkNewMatchesAvailable]", countError);
+    throw new Error(`Failed to count local matches: ${countError.message}`);
+  }
+
+  const localCount = count ?? 0;
+  // Same filter generateMatchesFromChallonge uses (skip bye / unresolved).
+  const remoteResolved = challongeMatches.filter(
+    (m) => m.player1_id && m.player2_id
+  ).length;
+
+  return remoteResolved > localCount;
+}
+
+export type RoundSyncHint = {
+  roundComplete: boolean;
+  newMatchesAvailable: boolean;
+  stage: string | null;
+};
+
+/**
+ * After a successful Challonge report, detect last-in-round + new Challonge matches.
+ */
+export async function getRoundSyncHintAfterReport(
+  matchId: string
+): Promise<RoundSyncHint> {
+  const admin = createAdminClient();
+  const { data: match, error } = await admin
+    .from("matches")
+    .select(
+      `
+      id,
+      stage,
+      tournament_id,
+      tournaments!matches_tournament_id_fkey(challonge_id)
+    `
+    )
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (error || !match) {
+    if (error) console.error("[matches:roundSyncHint]", error);
+    return { roundComplete: false, newMatchesAvailable: false, stage: null };
+  }
+
+  const stage = (match.stage as string | null) ?? null;
+  const tournamentId = String(match.tournament_id);
+  const tournamentRaw = match.tournaments as
+    | { challonge_id?: string | null }
+    | { challonge_id?: string | null }[]
+    | null;
+  const tournament = Array.isArray(tournamentRaw)
+    ? tournamentRaw[0]
+    : tournamentRaw;
+  const challongeId = tournament?.challonge_id
+    ? String(tournament.challonge_id)
+    : null;
+
+  if (!stage || !challongeId) {
+    return { roundComplete: false, newMatchesAvailable: false, stage };
+  }
+
+  const roundComplete = await checkRoundComplete(tournamentId, stage);
+  if (!roundComplete) {
+    return { roundComplete: false, newMatchesAvailable: false, stage };
+  }
+
+  try {
+    const newMatchesAvailable = await checkNewMatchesAvailable(
+      tournamentId,
+      challongeId
+    );
+    return { roundComplete: true, newMatchesAvailable, stage };
+  } catch (err) {
+    console.error("[matches:roundSyncHint] new matches check", err);
+    return { roundComplete: true, newMatchesAvailable: false, stage };
+  }
 }

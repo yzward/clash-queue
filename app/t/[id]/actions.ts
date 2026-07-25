@@ -45,6 +45,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   assignCourtToMatch,
   assignRefToMatch,
+  checkNewMatchesAvailable,
   generateMatchesFromChallonge,
   getCourtStatuses,
   listMatchesWithContext,
@@ -836,6 +837,39 @@ export async function refreshMatchesTabAction(
     console.error("[refreshMatchesTabAction]", err);
     const message =
       err instanceof Error ? err.message : "Failed to refresh matches";
+    return { ok: false, error: message };
+  }
+}
+
+export type CheckNewMatchesAvailableResult =
+  | { ok: true; available: boolean }
+  | { ok: false; error: string };
+
+/**
+ * Lightweight Challonge vs local match count — for Matches tab sync banner.
+ */
+export async function checkNewMatchesAvailableAction(
+  tournamentId: string
+): Promise<CheckNewMatchesAvailableResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const linked = await loadTournamentChallongeId(tournamentId);
+    if ("error" in linked) {
+      return { ok: true, available: false };
+    }
+    const available = await checkNewMatchesAvailable(
+      tournamentId,
+      linked.challongeId
+    );
+    return { ok: true, available };
+  } catch (err) {
+    console.error("[checkNewMatchesAvailableAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to check Challonge matches";
     return { ok: false, error: message };
   }
 }

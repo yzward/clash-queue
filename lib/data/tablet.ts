@@ -1,5 +1,8 @@
 import { listAvailableRefs, type AvailableRef } from "@/lib/data/players";
-import { reportSubmittedMatchToChallonge } from "@/lib/data/matches";
+import {
+  getRoundSyncHintAfterReport,
+  reportSubmittedMatchToChallonge,
+} from "@/lib/data/matches";
 import {
   buildState,
   computeEffectiveTotals,
@@ -665,6 +668,9 @@ export type SubmitMatchResult =
         error?: string;
         scores?: string;
       };
+      roundComplete?: boolean;
+      newMatchesAvailable?: boolean;
+      stage?: string | null;
     }
   | { ok: false; reason: "not_complete" | "not_found" | string };
 
@@ -946,7 +952,18 @@ export async function submitMatchResult(
     // Race: local already submitted — still try Challonge if never reported.
     if (!match.challonge_reported_at) {
       const challonge = await runChallongeReportPhase(matchId);
-      return { ok: true, finalState, challonge };
+      const syncHint =
+        challonge.attempted && challonge.ok
+          ? await getRoundSyncHintAfterReport(matchId)
+          : null;
+      return {
+        ok: true,
+        finalState,
+        challonge,
+        roundComplete: syncHint?.roundComplete ?? false,
+        newMatchesAvailable: syncHint?.newMatchesAvailable ?? false,
+        stage: syncHint?.stage ?? null,
+      };
     }
 
     return { ok: true, finalState };
@@ -1039,7 +1056,19 @@ export async function submitMatchResult(
 
   // Challonge is downstream — never roll back local submit on failure.
   const challonge = await runChallongeReportPhase(matchId);
-  return { ok: true, finalState, challonge };
+  const syncHint =
+    challonge.attempted && challonge.ok
+      ? await getRoundSyncHintAfterReport(matchId)
+      : null;
+
+  return {
+    ok: true,
+    finalState,
+    challonge,
+    roundComplete: syncHint?.roundComplete ?? false,
+    newMatchesAvailable: syncHint?.newMatchesAvailable ?? false,
+    stage: syncHint?.stage ?? null,
+  };
 }
 
 async function runChallongeReportPhase(matchId: string): Promise<{
