@@ -29,6 +29,7 @@ import {
   startTournament,
 } from "@/lib/challonge/client";
 import type { ChallongeMatch } from "@/lib/challonge/types";
+import { listCourts } from "@/lib/data/courts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type MatchRow = {
@@ -60,6 +61,44 @@ export type MatchPlayerRow = {
 export type MatchWithPlayers = {
   match: MatchRow;
   players: MatchPlayerRow[];
+};
+
+export type MatchContextPlayer = {
+  player_id: string;
+  display_name: string;
+  sets_won: number | null;
+  total_points: number | null;
+  winner: boolean | null;
+};
+
+export type MatchWithContext = {
+  match: {
+    id: string;
+    round: number | null;
+    stage: string | null;
+    match_number: number;
+    status: string | null;
+    challonge_match_id: string | null;
+    court_id: string | null;
+    ref_id: string | null;
+    winner_id: string | null;
+    updated_at: string | null;
+    created_at: string | null;
+  };
+  players: MatchContextPlayer[];
+  court: { id: string; name: string } | null;
+  ref: { id: string; display_name: string } | null;
+};
+
+export type CourtWithStatus = {
+  court: {
+    id: string;
+    name: string;
+    current_match_id: string | null;
+    tournament_id: string;
+    created_at: string;
+  };
+  current_match: MatchWithContext | null;
 };
 
 export type GenerateMatchesError = {
@@ -112,6 +151,23 @@ function mapMatchRow(row: Record<string, unknown>): MatchRow {
 function roundLabel(round: number | null): string | null {
   if (round == null || Number.isNaN(round)) return null;
   return round > 0 ? `Round ${round}` : `Losers Round ${Math.abs(round)}`;
+}
+
+/** Derive numeric round from stage text written at generate time. */
+export function parseRoundFromStage(stage: string | null): number | null {
+  if (!stage) return null;
+  const losers = stage.match(/losers\s*round\s*(\d+)/i);
+  if (losers) return -Math.abs(Number.parseInt(losers[1]!, 10));
+  const winners = stage.match(/\bround\s*(-?\d+)/i);
+  if (winners) return Number.parseInt(winners[1]!, 10);
+  return null;
+}
+
+function roundSortKey(round: number | null): number {
+  if (round == null) return Number.MAX_SAFE_INTEGER;
+  // Winners rounds first (1,2,3…), then losers (-1,-2…) by absolute value.
+  if (round > 0) return round;
+  return 1000 + Math.abs(round);
 }
 
 /**
@@ -223,6 +279,176 @@ export async function listMatchesWithPlayers(
   return matches.map((match) => ({
     match,
     players: byMatch.get(match.id) ?? [],
+  }));
+}
+
+export async function listMatchesWithContext(
+  tournamentId: string
+): Promise<MatchWithContext[]> {
+  const admin = createAdminClient();
+  const matches = await listMatches(tournamentId);
+  if (matches.length === 0) return [];
+
+  const matchIds = matches.map((m) => m.id);
+  const courtIds = [
+    ...new Set(
+      matches
+        .map((m) => m.court_id)
+        .filter((id): id is string => Boolean(id))
+    ),
+  ];
+  const refIds = [
+    ...new Set(
+      matches.map((m) => m.ref_id).filter((id): id is string => Boolean(id))
+    ),
+  ];
+
+  const [mpResult, courtsResult, refsResult] = await Promise.all([
+    admin
+      .from("match_players")
+      .select(
+        `
+        match_id,
+        player_id,
+        sets_won,
+        total_points,
+        winner,
+        created_at,
+        players!match_players_player_id_fkey(
+          id,
+          display_name
+        )
+      `
+      )
+      .in("match_id", matchIds)
+      .order("created_at", { ascending: true }),
+    courtIds.length > 0
+      ? admin.from("courts").select("id, name").in("id", courtIds)
+      : Promise.resolve({ data: [], error: null }),
+    refIds.length > 0
+      ? admin.from("players").select("id, display_name").in("id", refIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+
+  if (mpResult.error) {
+    console.error("[matches:listWithContext] match_players", mpResult.error);
+    throw new Error(
+      `Failed to load match players: ${mpResult.error.message}`
+    );
+  }
+  if (courtsResult.error) {
+    console.error("[matches:listWithContext] courts", courtsResult.error);
+    throw new Error(`Failed to load courts: ${courtsResult.error.message}`);
+  }
+  if (refsResult.error) {
+    console.error("[matches:listWithContext] refs", refsResult.error);
+    throw new Error(`Failed to load referees: ${refsResult.error.message}`);
+  }
+
+  const playersByMatch = new Map<string, MatchContextPlayer[]>();
+  for (const row of (mpResult.data ?? []) as Record<string, unknown>[]) {
+    const matchId = String(row.match_id);
+    const playersRaw = row.players;
+    let displayName = "Unknown";
+    if (
+      playersRaw &&
+      typeof playersRaw === "object" &&
+      !Array.isArray(playersRaw)
+    ) {
+      displayName = String(
+        (playersRaw as Record<string, unknown>).display_name ?? "Unknown"
+      );
+    }
+    const list = playersByMatch.get(matchId) ?? [];
+    list.push({
+      player_id: String(row.player_id),
+      display_name: displayName,
+      sets_won: typeof row.sets_won === "number" ? row.sets_won : null,
+      total_points:
+        typeof row.total_points === "number" ? row.total_points : null,
+      winner: typeof row.winner === "boolean" ? row.winner : null,
+    });
+    playersByMatch.set(matchId, list);
+  }
+
+  const courtById = new Map(
+    ((courtsResult.data ?? []) as Array<{ id: string; name: string }>).map(
+      (c) => [c.id, { id: c.id, name: c.name }]
+    )
+  );
+  const refById = new Map(
+    (
+      (refsResult.data ?? []) as Array<{ id: string; display_name: string }>
+    ).map((r) => [r.id, { id: r.id, display_name: r.display_name }])
+  );
+
+  // Number matches within each round (by stable id order).
+  const byRound = new Map<string, MatchRow[]>();
+  for (const match of matches) {
+    const round = parseRoundFromStage(match.stage);
+    const key = String(round ?? match.stage ?? "none");
+    const list = byRound.get(key) ?? [];
+    list.push(match);
+    byRound.set(key, list);
+  }
+  const matchNumberById = new Map<string, number>();
+  for (const list of byRound.values()) {
+    const sorted = [...list].sort((a, b) => a.id.localeCompare(b.id));
+    sorted.forEach((m, index) => {
+      matchNumberById.set(m.id, index + 1);
+    });
+  }
+
+  const rows: MatchWithContext[] = matches.map((match) => {
+    const round = parseRoundFromStage(match.stage);
+    return {
+      match: {
+        id: match.id,
+        round,
+        stage: match.stage,
+        match_number: matchNumberById.get(match.id) ?? 1,
+        status: match.status,
+        challonge_match_id: match.challonge_match_id,
+        court_id: match.court_id,
+        ref_id: match.ref_id,
+        winner_id: match.winner_id,
+        updated_at: match.updated_at,
+        created_at: match.created_at,
+      },
+      players: playersByMatch.get(match.id) ?? [],
+      court: match.court_id ? courtById.get(match.court_id) ?? null : null,
+      ref: match.ref_id ? refById.get(match.ref_id) ?? null : null,
+    };
+  });
+
+  rows.sort((a, b) => {
+    const roundDiff =
+      roundSortKey(a.match.round) - roundSortKey(b.match.round);
+    if (roundDiff !== 0) return roundDiff;
+    return a.match.id.localeCompare(b.match.id);
+  });
+
+  return rows;
+}
+
+export async function getCourtStatuses(
+  tournamentId: string,
+  preloadedMatches?: MatchWithContext[]
+): Promise<CourtWithStatus[]> {
+  const [courts, matches] = await Promise.all([
+    listCourts(tournamentId),
+    preloadedMatches
+      ? Promise.resolve(preloadedMatches)
+      : listMatchesWithContext(tournamentId),
+  ]);
+
+  const matchById = new Map(matches.map((m) => [m.match.id, m]));
+
+  return courts.map((court) => ({
+    court,
+    current_match: court.current_match_id
+      ? matchById.get(court.current_match_id) ?? null
+      : null,
   }));
 }
 

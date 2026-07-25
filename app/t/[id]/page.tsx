@@ -7,10 +7,15 @@ import { CourtsTab } from "@/components/courts-tab";
 import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
 import { SettingsTab } from "@/components/settings-tab";
+import { MatchesTab } from "@/components/matches-tab";
 import { SyncMatchesButton } from "@/components/sync-matches-button";
 import { requireTO } from "@/lib/auth/require-to";
 import { listCourts } from "@/lib/data/courts";
 import { listEntrants } from "@/lib/data/entrants";
+import {
+  getCourtStatuses,
+  listMatchesWithContext,
+} from "@/lib/data/matches";
 import {
   getTournamentDetail,
   type TournamentDetail,
@@ -255,16 +260,20 @@ export default async function TournamentDetailPage({
   const { tab: rawTab } = await searchParams;
   const activeTab = resolveTab(rawTab);
 
-  const [tournament, preflight, courts, entrants] = await Promise.all([
-    getTournamentDetail(id),
-    runPreflightChecks(id),
-    listCourts(id),
-    listEntrants(id),
-  ]);
+  const [tournament, preflight, courts, entrants, matchesWithContext] =
+    await Promise.all([
+      getTournamentDetail(id),
+      runPreflightChecks(id),
+      listCourts(id),
+      listEntrants(id),
+      listMatchesWithContext(id),
+    ]);
 
   if (!tournament) {
     notFound();
   }
+
+  const courtStatuses = await getCourtStatuses(id, matchesWithContext);
 
   const supabase = await createClient();
   const {
@@ -356,6 +365,12 @@ export default async function TournamentDetailPage({
           />
         ) : activeTab === "courts" ? (
           <CourtsTab initialCourts={courts} tournamentId={tournament.id} />
+        ) : activeTab === "matches" ? (
+          <MatchesTab
+            tournament={tournament}
+            initialCourts={courtStatuses}
+            initialMatches={matchesWithContext}
+          />
         ) : activeTab === "settings" ? (
           <SettingsTab
             tournament={{

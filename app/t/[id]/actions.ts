@@ -42,8 +42,12 @@ import {
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   generateMatchesFromChallonge,
+  getCourtStatuses,
+  listMatchesWithContext,
   startAndGenerateMatches,
+  type CourtWithStatus,
   type GenerateMatchesResult,
+  type MatchWithContext,
   type StartAndGenerateResult,
 } from "@/lib/data/matches";
 import {
@@ -116,6 +120,14 @@ export type StartAndGenerateMatchesActionResult = StartAndGenerateResult;
 
 export type SyncMatchesActionResult =
   | ({ ok: true } & GenerateMatchesResult)
+  | { ok: false; error: string };
+
+export type RefreshMatchesTabResult =
+  | {
+      ok: true;
+      matches: MatchWithContext[];
+      courts: CourtWithStatus[];
+    }
   | { ok: false; error: string };
 
 export type ChallongePreview = {
@@ -757,6 +769,26 @@ export async function syncMatchesAction(
     console.error("[syncMatchesAction]", err);
     const message =
       err instanceof Error ? err.message : "Failed to sync matches";
+    return { ok: false, error: message };
+  }
+}
+
+export async function refreshMatchesTabAction(
+  tournamentId: string
+): Promise<RefreshMatchesTabResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const matches = await listMatchesWithContext(tournamentId);
+    const courts = await getCourtStatuses(tournamentId, matches);
+    return { ok: true, matches, courts };
+  } catch (err) {
+    console.error("[refreshMatchesTabAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to refresh matches";
     return { ok: false, error: message };
   }
 }
