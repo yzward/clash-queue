@@ -4,21 +4,32 @@ import {
   useEffect,
   useEffectEvent,
   useMemo,
+  useOptimistic,
   useState,
   useTransition,
   type ReactNode,
 } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, MoreHorizontal } from "lucide-react";
+import { toast } from "sonner";
 
-import { refreshMatchesTabAction } from "@/app/t/[id]/actions";
+import {
+  assignCourtAction,
+  reassignCourtAction,
+  refreshMatchesTabAction,
+  unassignCourtAction,
+} from "@/app/t/[id]/actions";
 import { MatchDetailDrawer } from "@/components/match-detail-drawer";
 import { Button } from "@/components/ui/button";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
   CourtWithStatus,
   MatchWithContext,
@@ -26,6 +37,20 @@ import type {
 import type { TournamentDetail } from "@/lib/data/tournament-detail";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+
+type TabState = {
+  matches: MatchWithContext[];
+  courts: CourtWithStatus[];
+};
+
+type OptimisticUpdate =
+  | {
+      type: "assign_court";
+      matchId: string;
+      courtId: string;
+      courtName: string;
+    }
+  | { type: "unassign_court"; matchId: string };
 
 function formatRoundLabel(match: MatchWithContext["match"]): string {
   if (match.round == null) {
@@ -58,14 +83,70 @@ function elapsedMinutes(iso: string | null): number | null {
 }
 
 function statusGroupLabel(
-  status: string | null,
-  winnerId: string | null
+  status: string | null
 ): "In progress" | "Pending" | "Submitted" {
   if (isLiveStatus(status)) return "In progress";
-  if (status === "submitted") {
-    return winnerId ? "Submitted" : "Submitted";
-  }
+  if (status === "submitted") return "Submitted";
   return "Pending";
+}
+
+function freeCourts(courts: CourtWithStatus[]): CourtWithStatus[] {
+  return courts.filter((c) => !c.court.current_match_id);
+}
+
+function applyOptimistic(state: TabState, update: OptimisticUpdate): TabState {
+  if (update.type === "assign_court") {
+    const match = state.matches.find((m) => m.match.id === update.matchId);
+    if (!match) return state;
+
+    const nextMatch: MatchWithContext = {
+      ...match,
+      match: { ...match.match, court_id: update.courtId },
+      court: { id: update.courtId, name: update.courtName },
+    };
+
+    const matches = state.matches.map((m) =>
+      m.match.id === update.matchId ? nextMatch : m
+    );
+
+    const courts = state.courts.map((c) => {
+      if (c.court.id === update.courtId) {
+        return {
+          court: { ...c.court, current_match_id: update.matchId },
+          current_match: nextMatch,
+        };
+      }
+      if (c.court.current_match_id === update.matchId) {
+        return {
+          court: { ...c.court, current_match_id: null },
+          current_match: null,
+        };
+      }
+      return c;
+    });
+
+    return { matches, courts };
+  }
+
+  // unassign_court
+  const matches = state.matches.map((m) =>
+    m.match.id === update.matchId
+      ? {
+          ...m,
+          match: { ...m.match, court_id: null },
+          court: null,
+        }
+      : m
+  );
+  const courts = state.courts.map((c) =>
+    c.court.current_match_id === update.matchId
+      ? {
+          court: { ...c.court, current_match_id: null },
+          current_match: null,
+        }
+      : c
+  );
+  return { matches, courts };
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -79,12 +160,61 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
+function CourtAssignMenu({
+  free,
+  onAssign,
+  label = "Assign",
+}: {
+  free: CourtWithStatus[];
+  onAssign: (courtId: string, courtName: string) => void;
+  label?: string;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-[10px] text-muted-foreground"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {label}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[160px]">
+        {free.length === 0 ? (
+          <DropdownMenuItem disabled>All courts in use</DropdownMenuItem>
+        ) : (
+          free.map((c) => (
+            <DropdownMenuItem
+              key={c.court.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                onAssign(c.court.id, c.court.name);
+              }}
+            >
+              {c.court.name}
+            </DropdownMenuItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function CourtCard({
   courtStatus,
+  free,
   onSelect,
+  onReassign,
+  onUnassign,
 }: {
   courtStatus: CourtWithStatus;
+  free: CourtWithStatus[];
   onSelect: (match: MatchWithContext) => void;
+  onReassign: (matchId: string, courtId: string, courtName: string) => void;
+  onUnassign: (matchId: string) => void;
 }) {
   const current = courtStatus.current_match;
   const occupied = Boolean(current);
@@ -113,48 +243,108 @@ function CourtCard({
     ? elapsedMinutes(current.match.updated_at)
     : null;
 
+  const otherFree = free.filter((c) => c.court.id !== courtStatus.court.id);
+
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(current)}
-      className="flex min-h-[86px] w-full flex-col rounded-[10px] px-3.5 py-3 text-left transition-opacity hover:opacity-90"
+    <div
+      className="relative flex min-h-[86px] w-full flex-col rounded-[10px] px-3.5 py-3 text-left"
       style={{
         background: "rgba(34,197,94,0.04)",
         border: "1px solid rgba(34,197,94,0.2)",
         borderTop: "2px solid #22c55e",
       }}
     >
-      <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-        {courtStatus.court.name}
-      </p>
-      <p className="mt-1.5 text-sm font-medium text-white">
-        {matchupLabel(current)}
-      </p>
-      <p className="mt-1 text-[11px] text-muted-foreground">
-        {formatRoundLabel(current.match)}
-        {current.ref ? ` · ${current.ref.display_name}` : ""}
-      </p>
-      {mins != null ? (
-        <p className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-[#86efac]">
-          <span
-            className="size-1.5 rounded-full"
-            style={{ background: "#22c55e" }}
-          />
-          Live · {mins} min
+      <div className="absolute top-2 right-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground"
+              onClick={(e) => e.stopPropagation()}
+              aria-label="Court actions"
+            >
+              <MoreHorizontal className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[200px]">
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                Reassign to another court
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {otherFree.length === 0 ? (
+                  <DropdownMenuItem disabled>All courts in use</DropdownMenuItem>
+                ) : (
+                  otherFree.map((c) => (
+                    <DropdownMenuItem
+                      key={c.court.id}
+                      onClick={() =>
+                        onReassign(
+                          current.match.id,
+                          c.court.id,
+                          c.court.name
+                        )
+                      }
+                    >
+                      {c.court.name}
+                    </DropdownMenuItem>
+                  ))
+                )}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuItem onClick={() => onUnassign(current.match.id)}>
+              Send back to queue
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onSelect(current)}>
+              Open details
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onSelect(current)}
+        className="pr-7 text-left transition-opacity hover:opacity-90"
+      >
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+          {courtStatus.court.name}
         </p>
-      ) : null}
-    </button>
+        <p className="mt-1.5 text-sm font-medium text-white">
+          {matchupLabel(current)}
+        </p>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {formatRoundLabel(current.match)}
+          {current.ref ? ` · ${current.ref.display_name}` : ""}
+        </p>
+        {mins != null ? (
+          <p className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-[#86efac]">
+            <span
+              className="size-1.5 rounded-full"
+              style={{ background: "#22c55e" }}
+            />
+            Live · {mins} min
+          </p>
+        ) : null}
+      </button>
+    </div>
   );
 }
 
 function MatchRow({
   match,
+  free,
   onSelect,
+  onAssign,
   showMeta,
   showAssign,
 }: {
   match: MatchWithContext;
+  free: CourtWithStatus[];
   onSelect: (match: MatchWithContext) => void;
+  onAssign: (matchId: string, courtId: string, courtName: string) => void;
   showMeta?: boolean;
   showAssign?: boolean;
 }) {
@@ -187,30 +377,21 @@ function MatchRow({
           </span>
         ) : null}
         {!resolved ? (
-          <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] italic text-muted-foreground"
+          <span
+            className="shrink-0 rounded-full px-2 py-0.5 text-[10px] italic text-muted-foreground"
             style={{ background: "rgba(255,255,255,0.05)" }}
           >
             Locked
           </span>
         ) : null}
       </button>
-      {showAssign && resolved ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled
-                className="h-7 px-2 text-[10px] text-muted-foreground"
-              >
-                Assign
-              </Button>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>Assignment coming next step</TooltipContent>
-        </Tooltip>
+      {showAssign && resolved && !match.match.court_id ? (
+        <CourtAssignMenu
+          free={free}
+          onAssign={(courtId, courtName) =>
+            onAssign(match.match.id, courtId, courtName)
+          }
+        />
       ) : null}
     </div>
   );
@@ -225,20 +406,27 @@ export function MatchesTab({
   initialCourts: CourtWithStatus[];
   initialMatches: MatchWithContext[];
 }) {
-  const [courts, setCourts] = useState(initialCourts);
-  const [matches, setMatches] = useState(initialMatches);
+  const [base, setBase] = useState<TabState>({
+    matches: initialMatches,
+    courts: initialCourts,
+  });
+  const [optimistic, applyOptimisticUpdate] = useOptimistic(
+    base,
+    applyOptimistic
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [, startTransition] = useTransition();
+
+  const matches = optimistic.matches;
+  const courts = optimistic.courts;
+  const free = useMemo(() => freeCourts(courts), [courts]);
 
   const selected =
     matches.find((m) => m.match.id === selectedId) ?? null;
 
   const queue = useMemo(
-    () =>
-      matches.filter(
-        (m) => m.match.status === "pending" && isResolved(m)
-      ),
+    () => matches.filter((m) => m.match.status === "pending" && isResolved(m) && !m.match.court_id),
     [matches]
   );
 
@@ -251,31 +439,30 @@ export function MatchesTab({
   );
 
   const groupedAll = useMemo(() => {
-    const groups: Record<"In progress" | "Pending" | "Submitted", MatchWithContext[]> =
-      {
-        "In progress": [],
-        Pending: [],
-        Submitted: [],
-      };
+    const groups: Record<
+      "In progress" | "Pending" | "Submitted",
+      MatchWithContext[]
+    > = {
+      "In progress": [],
+      Pending: [],
+      Submitted: [],
+    };
     for (const m of matches) {
-      const key = statusGroupLabel(m.match.status, m.match.winner_id);
-      groups[key].push(m);
+      groups[statusGroupLabel(m.match.status)].push(m);
     }
     return groups;
   }, [matches]);
 
-  const onRealtimeChange = useEffectEvent(() => {
+  const refresh = useEffectEvent(() => {
     startTransition(async () => {
       const result = await refreshMatchesTabAction(tournament.id);
       if (!result.ok) return;
-      setMatches(result.matches);
-      setCourts(result.courts);
+      setBase({ matches: result.matches, courts: result.courts });
     });
   });
 
   useEffect(() => {
-    setMatches(initialMatches);
-    setCourts(initialCourts);
+    setBase({ matches: initialMatches, courts: initialCourts });
   }, [initialMatches, initialCourts]);
 
   useEffect(() => {
@@ -290,7 +477,7 @@ export function MatchesTab({
           table: "matches",
           filter: `tournament_id=eq.${tournament.id}`,
         },
-        () => onRealtimeChange()
+        () => refresh()
       )
       .on(
         "postgres_changes",
@@ -300,7 +487,7 @@ export function MatchesTab({
           table: "courts",
           filter: `tournament_id=eq.${tournament.id}`,
         },
-        () => onRealtimeChange()
+        () => refresh()
       )
       .on(
         "postgres_changes",
@@ -309,7 +496,7 @@ export function MatchesTab({
           schema: "public",
           table: "match_players",
         },
-        () => onRealtimeChange()
+        () => refresh()
       )
       .subscribe();
 
@@ -322,13 +509,114 @@ export function MatchesTab({
     setSelectedId(match.match.id);
   }
 
+  function handleAssignCourt(
+    matchId: string,
+    courtId: string,
+    courtName: string
+  ) {
+    const match = matches.find((m) => m.match.id === matchId);
+    const label = match ? matchupLabel(match) : "Match";
+
+    startTransition(async () => {
+      applyOptimisticUpdate({
+        type: "assign_court",
+        matchId,
+        courtId,
+        courtName,
+      });
+      const result = await assignCourtAction(
+        matchId,
+        courtId,
+        tournament.id
+      );
+      if (!result.ok) {
+        if (result.error === "court_occupied") {
+          toast.error(result.message);
+        } else {
+          toast.error(result.message);
+        }
+        refresh();
+        return;
+      }
+      toast.success(`Assigned ${label} to ${courtName}`);
+      refresh();
+    });
+  }
+
+  function handleReassignCourt(
+    matchId: string,
+    courtId: string,
+    courtName: string
+  ) {
+    const match = matches.find((m) => m.match.id === matchId);
+    const label = match ? matchupLabel(match) : "Match";
+
+    startTransition(async () => {
+      applyOptimisticUpdate({
+        type: "assign_court",
+        matchId,
+        courtId,
+        courtName,
+      });
+      const result = await reassignCourtAction(
+        matchId,
+        courtId,
+        tournament.id
+      );
+      if (!result.ok) {
+        toast.error(result.message);
+        refresh();
+        return;
+      }
+      toast.success(`Moved ${label} to ${courtName}`);
+      refresh();
+    });
+  }
+
+  function handleUnassignCourt(matchId: string) {
+    const match = matches.find((m) => m.match.id === matchId);
+    const label = match ? matchupLabel(match) : "Match";
+
+    startTransition(async () => {
+      applyOptimisticUpdate({ type: "unassign_court", matchId });
+      const result = await unassignCourtAction(matchId, tournament.id);
+      if (!result.ok) {
+        toast.error(result.message);
+        refresh();
+        return;
+      }
+      toast.success(`Sent ${label} back to queue`);
+      refresh();
+    });
+  }
+
+  function patchFromDrawer(next: MatchWithContext) {
+    setBase((prev) => {
+      const matchesNext = prev.matches.map((m) =>
+        m.match.id === next.match.id ? next : m
+      );
+      // Rebuild court occupancy from match court_ids + previous court rows.
+      const courtsNext = prev.courts.map((c) => {
+        const occupying = matchesNext.find(
+          (m) => m.match.court_id === c.court.id
+        );
+        return {
+          court: {
+            ...c.court,
+            current_match_id: occupying?.match.id ?? null,
+          },
+          current_match: occupying ?? null,
+        };
+      });
+      return { matches: matchesNext, courts: courtsNext };
+    });
+  }
+
   return (
     <TooltipProvider>
       <div className="space-y-6">
         <section>
-          <SectionLabel>
-            ◆ Courts · {courts.length}
-          </SectionLabel>
+          <SectionLabel>◆ Courts · {courts.length}</SectionLabel>
           {courts.length === 0 ? (
             <div
               className="rounded-[10px] px-4 py-8 text-center text-sm text-muted-foreground"
@@ -345,7 +633,10 @@ export function MatchesTab({
                 <CourtCard
                   key={courtStatus.court.id}
                   courtStatus={courtStatus}
+                  free={free}
                   onSelect={selectMatch}
+                  onReassign={handleReassignCourt}
+                  onUnassign={handleUnassignCourt}
                 />
               ))}
             </div>
@@ -353,9 +644,7 @@ export function MatchesTab({
         </section>
 
         <section>
-          <SectionLabel>
-            ◆ Queue · {queue.length} waiting
-          </SectionLabel>
+          <SectionLabel>◆ Queue · {queue.length} waiting</SectionLabel>
           {queue.length === 0 && lockedPending.length === 0 ? (
             <div
               className="rounded-[10px] px-4 py-6 text-center text-sm text-muted-foreground"
@@ -374,7 +663,9 @@ export function MatchesTab({
                 <MatchRow
                   key={match.match.id}
                   match={match}
+                  free={free}
                   onSelect={selectMatch}
+                  onAssign={handleAssignCourt}
                   showAssign
                 />
               ))}
@@ -382,7 +673,9 @@ export function MatchesTab({
                 <MatchRow
                   key={match.match.id}
                   match={match}
+                  free={free}
                   onSelect={selectMatch}
+                  onAssign={handleAssignCourt}
                 />
               ))}
             </div>
@@ -401,31 +694,37 @@ export function MatchesTab({
             </button>
           ) : (
             <div className="space-y-4">
-              {(
-                ["In progress", "Pending", "Submitted"] as const
-              ).map((group) => {
-                const rows = groupedAll[group];
-                if (rows.length === 0) return null;
-                return (
-                  <div key={group}>
-                    <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-                      {group}
-                      {group === "Submitted" ? " / Completed" : ""} ·{" "}
-                      {rows.length}
-                    </p>
-                    <div className="flex flex-col gap-1.5">
-                      {rows.map((match) => (
-                        <MatchRow
-                          key={match.match.id}
-                          match={match}
-                          onSelect={selectMatch}
-                          showMeta
-                        />
-                      ))}
+              {(["In progress", "Pending", "Submitted"] as const).map(
+                (group) => {
+                  const rows = groupedAll[group];
+                  if (rows.length === 0) return null;
+                  return (
+                    <div key={group}>
+                      <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+                        {group}
+                        {group === "Submitted" ? " / Completed" : ""} ·{" "}
+                        {rows.length}
+                      </p>
+                      <div className="flex flex-col gap-1.5">
+                        {rows.map((match) => (
+                          <MatchRow
+                            key={match.match.id}
+                            match={match}
+                            free={free}
+                            onSelect={selectMatch}
+                            onAssign={handleAssignCourt}
+                            showMeta
+                            showAssign={
+                              match.match.status === "pending" &&
+                              !match.match.court_id
+                            }
+                          />
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                }
+              )}
               <button
                 type="button"
                 onClick={() => setShowAll(false)}
@@ -445,6 +744,21 @@ export function MatchesTab({
         onOpenChange={(open) => {
           if (!open) setSelectedId(null);
         }}
+        tournamentId={tournament.id}
+        freeCourts={free.map((c) => ({
+          id: c.court.id,
+          name: c.court.name,
+        }))}
+        allCourts={courts.map((c) => ({
+          id: c.court.id,
+          name: c.court.name,
+          occupied: Boolean(c.court.current_match_id),
+          occupiedByThis:
+            c.court.current_match_id != null &&
+            c.court.current_match_id === selectedId,
+        }))}
+        onMatchUpdated={patchFromDrawer}
+        onRefresh={refresh}
       />
     </TooltipProvider>
   );

@@ -716,3 +716,340 @@ async function ingestOneChallongeMatch(args: {
   existingByChallongeId.add(challongeMatchId);
   result.generated++;
 }
+
+/**
+ * Assignment linkage (verified 2026-07-25 against information_schema):
+ * - matches.court_id UUID FK → courts.id (nullable)
+ * - courts.current_match_id UUID FK → matches.id (nullable) — board occupancy
+ * - matches.ref_id UUID FK → players.id (nullable)
+ * Assign/unassign keep court_id and current_match_id in sync.
+ * Court claim uses a conditional update (current_match_id IS NULL) to avoid races.
+ */
+
+export type AssignCourtSuccess = {
+  ok: true;
+  match: MatchWithContext;
+};
+
+export type AssignCourtConflict = {
+  ok: false;
+  error: "court_occupied";
+  message: string;
+  occupying_match: MatchWithContext | null;
+};
+
+export type AssignCourtFailure = {
+  ok: false;
+  error: string;
+  message: string;
+};
+
+export type AssignCourtResult =
+  | AssignCourtSuccess
+  | AssignCourtConflict
+  | AssignCourtFailure;
+
+export type AssignRefResult =
+  | { ok: true; match: MatchWithContext }
+  | { ok: false; error: string; message: string };
+
+async function loadMatchContext(
+  tournamentId: string,
+  matchId: string
+): Promise<MatchWithContext | null> {
+  const rows = await listMatchesWithContext(tournamentId);
+  return rows.find((row) => row.match.id === matchId) ?? null;
+}
+
+async function assertMatchInTournament(
+  admin: ReturnType<typeof createAdminClient>,
+  matchId: string,
+  tournamentId: string
+): Promise<{ id: string; court_id: string | null; ref_id: string | null } | null> {
+  const { data, error } = await admin
+    .from("matches")
+    .select("id, court_id, ref_id, tournament_id")
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[matches:assert]", error);
+    throw new Error(`Failed to load match: ${error.message}`);
+  }
+  if (!data || data.tournament_id !== tournamentId) return null;
+  return {
+    id: String(data.id),
+    court_id: (data.court_id as string | null) ?? null,
+    ref_id: (data.ref_id as string | null) ?? null,
+  };
+}
+
+async function clearMatchFromCourts(
+  admin: ReturnType<typeof createAdminClient>,
+  matchId: string
+): Promise<void> {
+  const { error } = await admin
+    .from("courts")
+    .update({ current_match_id: null })
+    .eq("current_match_id", matchId);
+
+  if (error) {
+    console.error("[matches:clearCourt]", error);
+    throw new Error(`Failed to clear court occupancy: ${error.message}`);
+  }
+}
+
+export async function assignCourtToMatch(
+  matchId: string,
+  courtId: string,
+  tournamentId: string
+): Promise<AssignCourtResult> {
+  const admin = createAdminClient();
+
+  const match = await assertMatchInTournament(admin, matchId, tournamentId);
+  if (!match) {
+    return { ok: false, error: "not_found", message: "Match not found" };
+  }
+
+  const { data: court, error: courtError } = await admin
+    .from("courts")
+    .select("id, name, current_match_id, tournament_id")
+    .eq("id", courtId)
+    .maybeSingle();
+
+  if (courtError) {
+    console.error("[matches:assignCourt] court", courtError);
+    return {
+      ok: false,
+      error: "court_lookup",
+      message: `Failed to load court: ${courtError.message}`,
+    };
+  }
+  if (!court || court.tournament_id !== tournamentId) {
+    return { ok: false, error: "not_found", message: "Court not found" };
+  }
+
+  // Already assigned to this court — idempotent success.
+  if (
+    match.court_id === courtId &&
+    court.current_match_id === matchId
+  ) {
+    const ctx = await loadMatchContext(tournamentId, matchId);
+    if (!ctx) {
+      return { ok: false, error: "not_found", message: "Match not found" };
+    }
+    return { ok: true, match: ctx };
+  }
+
+  if (court.current_match_id && court.current_match_id !== matchId) {
+    const occupying = await loadMatchContext(
+      tournamentId,
+      String(court.current_match_id)
+    );
+    return {
+      ok: false,
+      error: "court_occupied",
+      message: `${court.name} is already occupied`,
+      occupying_match: occupying,
+    };
+  }
+
+  // Detach from any previous court first.
+  await clearMatchFromCourts(admin, matchId);
+
+  // Conditional claim — fails if another TO grabbed the court between checks.
+  const { data: claimed, error: claimError } = await admin
+    .from("courts")
+    .update({ current_match_id: matchId })
+    .eq("id", courtId)
+    .eq("tournament_id", tournamentId)
+    .is("current_match_id", null)
+    .select("id, name, current_match_id")
+    .maybeSingle();
+
+  if (claimError) {
+    console.error("[matches:assignCourt] claim", claimError);
+    return {
+      ok: false,
+      error: "claim_failed",
+      message: `Failed to claim court: ${claimError.message}`,
+    };
+  }
+
+  if (!claimed) {
+    const { data: busy } = await admin
+      .from("courts")
+      .select("id, name, current_match_id")
+      .eq("id", courtId)
+      .maybeSingle();
+    const occupyingId = busy?.current_match_id
+      ? String(busy.current_match_id)
+      : null;
+    const occupying = occupyingId
+      ? await loadMatchContext(tournamentId, occupyingId)
+      : null;
+    return {
+      ok: false,
+      error: "court_occupied",
+      message: `${busy?.name ?? "Court"} is already occupied`,
+      occupying_match: occupying,
+    };
+  }
+
+  const { error: matchUpdateError } = await admin
+    .from("matches")
+    .update({ court_id: courtId })
+    .eq("id", matchId)
+    .eq("tournament_id", tournamentId);
+
+  if (matchUpdateError) {
+    console.error("[matches:assignCourt] match", matchUpdateError);
+    // Roll back court claim so we don't leave a dangling occupancy.
+    await admin
+      .from("courts")
+      .update({ current_match_id: null })
+      .eq("id", courtId)
+      .eq("current_match_id", matchId);
+    return {
+      ok: false,
+      error: "match_update",
+      message: `Failed to assign court: ${matchUpdateError.message}`,
+    };
+  }
+
+  const ctx = await loadMatchContext(tournamentId, matchId);
+  if (!ctx) {
+    return { ok: false, error: "not_found", message: "Match not found after assign" };
+  }
+  return { ok: true, match: ctx };
+}
+
+export async function unassignCourt(
+  matchId: string,
+  tournamentId: string
+): Promise<AssignCourtResult> {
+  const admin = createAdminClient();
+
+  const match = await assertMatchInTournament(admin, matchId, tournamentId);
+  if (!match) {
+    return { ok: false, error: "not_found", message: "Match not found" };
+  }
+
+  await clearMatchFromCourts(admin, matchId);
+
+  const { error } = await admin
+    .from("matches")
+    .update({ court_id: null })
+    .eq("id", matchId)
+    .eq("tournament_id", tournamentId);
+
+  if (error) {
+    console.error("[matches:unassignCourt]", error);
+    return {
+      ok: false,
+      error: "match_update",
+      message: `Failed to unassign court: ${error.message}`,
+    };
+  }
+
+  const ctx = await loadMatchContext(tournamentId, matchId);
+  if (!ctx) {
+    return { ok: false, error: "not_found", message: "Match not found after unassign" };
+  }
+  return { ok: true, match: ctx };
+}
+
+export async function reassignCourt(
+  matchId: string,
+  newCourtId: string,
+  tournamentId: string
+): Promise<AssignCourtResult> {
+  // Same path as assign — clears old court, then conditionally claims the new one.
+  return assignCourtToMatch(matchId, newCourtId, tournamentId);
+}
+
+export async function assignRefToMatch(
+  matchId: string,
+  refPlayerId: string,
+  tournamentId: string
+): Promise<AssignRefResult> {
+  const admin = createAdminClient();
+
+  const match = await assertMatchInTournament(admin, matchId, tournamentId);
+  if (!match) {
+    return { ok: false, error: "not_found", message: "Match not found" };
+  }
+
+  const { data: player, error: playerError } = await admin
+    .from("players")
+    .select("id")
+    .eq("id", refPlayerId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (playerError) {
+    console.error("[matches:assignRef] player", playerError);
+    return {
+      ok: false,
+      error: "player_lookup",
+      message: `Failed to load referee: ${playerError.message}`,
+    };
+  }
+  if (!player) {
+    return { ok: false, error: "not_found", message: "Referee not found" };
+  }
+
+  const { error } = await admin
+    .from("matches")
+    .update({ ref_id: refPlayerId })
+    .eq("id", matchId)
+    .eq("tournament_id", tournamentId);
+
+  if (error) {
+    console.error("[matches:assignRef]", error);
+    return {
+      ok: false,
+      error: "match_update",
+      message: `Failed to assign referee: ${error.message}`,
+    };
+  }
+
+  const ctx = await loadMatchContext(tournamentId, matchId);
+  if (!ctx) {
+    return { ok: false, error: "not_found", message: "Match not found after assign" };
+  }
+  return { ok: true, match: ctx };
+}
+
+export async function unassignRef(
+  matchId: string,
+  tournamentId: string
+): Promise<AssignRefResult> {
+  const admin = createAdminClient();
+
+  const match = await assertMatchInTournament(admin, matchId, tournamentId);
+  if (!match) {
+    return { ok: false, error: "not_found", message: "Match not found" };
+  }
+
+  const { error } = await admin
+    .from("matches")
+    .update({ ref_id: null })
+    .eq("id", matchId)
+    .eq("tournament_id", tournamentId);
+
+  if (error) {
+    console.error("[matches:unassignRef]", error);
+    return {
+      ok: false,
+      error: "match_update",
+      message: `Failed to unassign referee: ${error.message}`,
+    };
+  }
+
+  const ctx = await loadMatchContext(tournamentId, matchId);
+  if (!ctx) {
+    return { ok: false, error: "not_found", message: "Match not found after unassign" };
+  }
+  return { ok: true, match: ctx };
+}

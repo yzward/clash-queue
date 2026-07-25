@@ -24,8 +24,10 @@ import {
   withdrawEntrant,
 } from "@/lib/data/entrants";
 import {
+  listAvailableRefs,
   listPlayersForBulkPicker,
   searchPlayers,
+  type AvailableRef,
   type BulkPickerPlayer,
   type PlayerSearchResult,
 } from "@/lib/data/players";
@@ -41,10 +43,17 @@ import {
 } from "@/lib/challonge/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
+  assignCourtToMatch,
+  assignRefToMatch,
   generateMatchesFromChallonge,
   getCourtStatuses,
   listMatchesWithContext,
+  reassignCourt,
   startAndGenerateMatches,
+  unassignCourt,
+  unassignRef,
+  type AssignCourtResult,
+  type AssignRefResult,
   type CourtWithStatus,
   type GenerateMatchesResult,
   type MatchWithContext,
@@ -129,6 +138,13 @@ export type RefreshMatchesTabResult =
       courts: CourtWithStatus[];
     }
   | { ok: false; error: string };
+
+export type ListAvailableRefsResult =
+  | { ok: true; refs: AvailableRef[] }
+  | { ok: false; error: string };
+
+export type AssignCourtActionResult = AssignCourtResult;
+export type AssignRefActionResult = AssignRefResult;
 
 export type ChallongePreview = {
   id: string;
@@ -790,6 +806,143 @@ export async function refreshMatchesTabAction(
     const message =
       err instanceof Error ? err.message : "Failed to refresh matches";
     return { ok: false, error: message };
+  }
+}
+
+export async function listAvailableRefsAction(
+  tournamentId: string
+): Promise<ListAvailableRefsResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const refs = await listAvailableRefs(tournamentId);
+    return { ok: true, refs };
+  } catch (err) {
+    console.error("[listAvailableRefsAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to load referees";
+    return { ok: false, error: message };
+  }
+}
+
+export async function assignCourtAction(
+  matchId: string,
+  courtId: string,
+  tournamentId: string
+): Promise<AssignCourtActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const result = await assignCourtToMatch(matchId, courtId, tournamentId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[assignCourtAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to assign court";
+    return { ok: false, error: "unexpected", message };
+  }
+}
+
+export async function unassignCourtAction(
+  matchId: string,
+  tournamentId: string
+): Promise<AssignCourtActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const result = await unassignCourt(matchId, tournamentId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[unassignCourtAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to unassign court";
+    return { ok: false, error: "unexpected", message };
+  }
+}
+
+export async function reassignCourtAction(
+  matchId: string,
+  newCourtId: string,
+  tournamentId: string
+): Promise<AssignCourtActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const result = await reassignCourt(matchId, newCourtId, tournamentId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[reassignCourtAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to reassign court";
+    return { ok: false, error: "unexpected", message };
+  }
+}
+
+export async function assignRefAction(
+  matchId: string,
+  refPlayerId: string,
+  tournamentId: string
+): Promise<AssignRefActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const result = await assignRefToMatch(matchId, refPlayerId, tournamentId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[assignRefAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to assign referee";
+    return { ok: false, error: "unexpected", message };
+  }
+}
+
+export async function unassignRefAction(
+  matchId: string,
+  tournamentId: string
+): Promise<AssignRefActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const result = await unassignRef(matchId, tournamentId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[unassignRefAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to unassign referee";
+    return { ok: false, error: "unexpected", message };
   }
 }
 

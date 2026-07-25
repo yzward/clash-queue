@@ -175,3 +175,69 @@ export async function listPlayersForBulkPicker(
     })
     .slice(0, limit);
 }
+
+export type AvailableRef = {
+  id: string;
+  display_name: string;
+};
+
+const REF_ROLE_NAMES = ["Admin", "Ops", "Referee", "Organiser"] as const;
+
+/**
+ * Players who can be assigned as match referees.
+ * tournamentId is reserved for future tournament-scoped staffing filters.
+ */
+export async function listAvailableRefs(
+  _tournamentId: string
+): Promise<AvailableRef[]> {
+  const admin = createAdminClient();
+
+  const { data: roles, error: rolesError } = await admin
+    .from("roles")
+    .select("id")
+    .in("name", [...REF_ROLE_NAMES]);
+
+  if (rolesError) {
+    console.error("[listAvailableRefs] roles", rolesError);
+    throw new Error(`Failed to load roles: ${rolesError.message}`);
+  }
+
+  const roleIds = (roles ?? []).map((r) => String(r.id));
+  if (roleIds.length === 0) return [];
+
+  const { data: links, error: linksError } = await admin
+    .from("user_roles")
+    .select("player_id")
+    .in("role_id", roleIds);
+
+  if (linksError) {
+    console.error("[listAvailableRefs] user_roles", linksError);
+    throw new Error(`Failed to load ref roles: ${linksError.message}`);
+  }
+
+  const playerIds = [
+    ...new Set(
+      (links ?? [])
+        .map((row) => row.player_id as string | null)
+        .filter((id): id is string => Boolean(id))
+    ),
+  ];
+  if (playerIds.length === 0) return [];
+
+  const { data: players, error: playersError } = await admin
+    .from("players")
+    .select("id, display_name")
+    .in("id", playerIds)
+    .is("deleted_at", null)
+    .order("display_name", { ascending: true });
+
+  if (playersError) {
+    console.error("[listAvailableRefs] players", playersError);
+    throw new Error(`Failed to load refs: ${playersError.message}`);
+  }
+
+  return (players ?? []).map((p) => ({
+    id: String(p.id),
+    display_name: String(p.display_name ?? ""),
+  }));
+}

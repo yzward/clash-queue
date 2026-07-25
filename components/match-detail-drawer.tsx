@@ -1,8 +1,24 @@
 "use client";
 
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { Trophy } from "lucide-react";
+import { toast } from "sonner";
 
+import {
+  assignCourtAction,
+  assignRefAction,
+  listAvailableRefsAction,
+  unassignCourtAction,
+  unassignRefAction,
+} from "@/app/t/[id]/actions";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import {
   Sheet,
   SheetContent,
@@ -18,12 +34,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { MatchWithContext } from "@/lib/data/matches";
+import type { AvailableRef } from "@/lib/data/players";
 
 function formatRoundLabel(match: MatchWithContext["match"]): string {
   if (match.round == null) {
     return match.stage ?? "Match";
   }
-  const prefix = match.round < 0 ? `LR${Math.abs(match.round)}` : `R${match.round}`;
+  const prefix =
+    match.round < 0 ? `LR${Math.abs(match.round)}` : `R${match.round}`;
   return `${prefix}·${match.match_number}`;
 }
 
@@ -49,47 +67,65 @@ function relativeTime(iso: string | null): string | null {
   return `${hours} hours ago`;
 }
 
-function DisabledAction({
-  label,
-  tooltip,
-  primary,
-}: {
-  label: string;
-  tooltip: string;
-  primary?: boolean;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">
-          <Button
-            type="button"
-            disabled
-            className={
-              primary
-                ? "bg-[#a78bfa]/40 text-[#0a0a12]"
-                : "border border-white/15 bg-transparent text-muted-foreground"
-            }
-            variant={primary ? "default" : "ghost"}
-          >
-            {label}
-          </Button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{tooltip}</TooltipContent>
-    </Tooltip>
-  );
+function matchupLabel(match: MatchWithContext): string {
+  const p1 = match.players[0]?.display_name ?? "TBD";
+  const p2 = match.players[1]?.display_name ?? "TBD";
+  return `${p1} vs ${p2}`;
 }
 
 export function MatchDetailDrawer({
   match,
   open,
   onOpenChange,
+  tournamentId,
+  freeCourts,
+  allCourts,
+  onMatchUpdated,
+  onRefresh,
 }: {
   match: MatchWithContext | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  tournamentId: string;
+  freeCourts: Array<{ id: string; name: string }>;
+  allCourts: Array<{
+    id: string;
+    name: string;
+    occupied: boolean;
+    occupiedByThis: boolean;
+  }>;
+  onMatchUpdated: (match: MatchWithContext) => void;
+  onRefresh: () => void;
 }) {
+  const [refs, setRefs] = useState<AvailableRef[]>([]);
+  const [refQuery, setRefQuery] = useState("");
+  const [refsLoaded, setRefsLoaded] = useState(false);
+  const [isPending, startTransition] = useTransition();
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      const result = await listAvailableRefsAction(tournamentId);
+      if (cancelled) return;
+      if (result.ok) {
+        setRefs(result.refs);
+        setRefsLoaded(true);
+      } else {
+        toast.error(result.error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, tournamentId]);
+
+  const filteredRefs = useMemo(() => {
+    const q = refQuery.trim().toLowerCase();
+    if (!q) return refs;
+    return refs.filter((r) => r.display_name.toLowerCase().includes(q));
+  }, [refs, refQuery]);
+
   const p1 = match?.players[0] ?? null;
   const p2 = match?.players[1] ?? null;
   const winnerName =
@@ -103,6 +139,80 @@ export function MatchDetailDrawer({
     match?.match.status === "grabbed";
   const startedLabel =
     isLive && match ? relativeTime(match.match.updated_at) : null;
+
+  const assignableCourts = allCourts.filter(
+    (c) => !c.occupied || c.occupiedByThis
+  );
+
+  function handleAssignCourt(courtId: string, courtName: string) {
+    if (!match) return;
+    const label = matchupLabel(match);
+    startTransition(async () => {
+      const result = await assignCourtAction(
+        match.match.id,
+        courtId,
+        tournamentId
+      );
+      if (!result.ok) {
+        toast.error(result.message);
+        onRefresh();
+        return;
+      }
+      onMatchUpdated(result.match);
+      toast.success(`Assigned ${label} to ${courtName}`);
+      onRefresh();
+    });
+  }
+
+  function handleUnassignCourt() {
+    if (!match) return;
+    const label = matchupLabel(match);
+    startTransition(async () => {
+      const result = await unassignCourtAction(match.match.id, tournamentId);
+      if (!result.ok) {
+        toast.error(result.message);
+        onRefresh();
+        return;
+      }
+      onMatchUpdated(result.match);
+      toast.success(`Sent ${label} back to queue`);
+      onRefresh();
+    });
+  }
+
+  function handleAssignRef(ref: AvailableRef) {
+    if (!match) return;
+    startTransition(async () => {
+      const result = await assignRefAction(
+        match.match.id,
+        ref.id,
+        tournamentId
+      );
+      if (!result.ok) {
+        toast.error(result.message);
+        onRefresh();
+        return;
+      }
+      onMatchUpdated(result.match);
+      toast.success(`Assigned ${ref.display_name} as referee`);
+      onRefresh();
+    });
+  }
+
+  function handleUnassignRef() {
+    if (!match) return;
+    startTransition(async () => {
+      const result = await unassignRefAction(match.match.id, tournamentId);
+      if (!result.ok) {
+        toast.error(result.message);
+        onRefresh();
+        return;
+      }
+      onMatchUpdated(result.match);
+      toast.success("Referee unassigned");
+      onRefresh();
+    });
+  }
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -121,12 +231,11 @@ export function MatchDetailDrawer({
                 <span
                   className="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
                   style={{
-                    background:
-                      isLive
-                        ? "rgba(34,197,94,0.15)"
-                        : match.match.status === "submitted"
-                          ? "rgba(167,139,250,0.15)"
-                          : "rgba(255,255,255,0.06)",
+                    background: isLive
+                      ? "rgba(34,197,94,0.15)"
+                      : match.match.status === "submitted"
+                        ? "rgba(167,139,250,0.15)"
+                        : "rgba(255,255,255,0.06)",
                     color: isLive
                       ? "#86efac"
                       : match.match.status === "submitted"
@@ -233,16 +342,127 @@ export function MatchDetailDrawer({
 
             <SheetFooter className="border-t border-white/10 bg-[#0f0e16]">
               <div className="flex flex-wrap gap-2">
-                <DisabledAction
-                  label="Score"
-                  tooltip="Coming in later step"
-                  primary
-                />
-                <DisabledAction
-                  label="Assign court"
-                  tooltip="Coming next step"
-                />
-                <DisabledAction label="Assign ref" tooltip="Coming next step" />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        type="button"
+                        disabled
+                        className="bg-[#a78bfa]/40 text-[#0a0a12]"
+                      >
+                        Score
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>Coming in later step</TooltipContent>
+                </Tooltip>
+
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={isPending}
+                      className="border border-white/15"
+                    >
+                      Assign court
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="min-w-[180px]">
+                    {assignableCourts.length === 0 ? (
+                      <DropdownMenuItem disabled>
+                        All courts in use
+                      </DropdownMenuItem>
+                    ) : (
+                      assignableCourts.map((c) => (
+                        <DropdownMenuItem
+                          key={c.id}
+                          disabled={c.occupiedByThis}
+                          onClick={() => handleAssignCourt(c.id, c.name)}
+                        >
+                          {c.name}
+                          {c.occupiedByThis ? " (current)" : ""}
+                        </DropdownMenuItem>
+                      ))
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+
+                <DropdownMenu
+                  onOpenChange={(next) => {
+                    if (!next) setRefQuery("");
+                  }}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={isPending}
+                      className="border border-white/15"
+                    >
+                      Assign ref
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="start"
+                    className="w-[240px] p-2"
+                    onCloseAutoFocus={(e) => e.preventDefault()}
+                  >
+                    <Input
+                      value={refQuery}
+                      onChange={(e) => setRefQuery(e.target.value)}
+                      placeholder="Search refs..."
+                      className="mb-2 h-8 text-xs"
+                      onKeyDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <div className="max-h-[220px] overflow-y-auto">
+                      {!refsLoaded ? (
+                        <p className="px-1.5 py-2 text-[11px] text-muted-foreground">
+                          Loading…
+                        </p>
+                      ) : filteredRefs.length === 0 ? (
+                        <p className="px-1.5 py-2 text-[11px] text-muted-foreground">
+                          No refs found
+                        </p>
+                      ) : (
+                        filteredRefs.map((ref) => (
+                          <DropdownMenuItem
+                            key={ref.id}
+                            onClick={() => handleAssignRef(ref)}
+                          >
+                            {ref.display_name}
+                          </DropdownMenuItem>
+                        ))
+                      )}
+                    </div>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+
+                {match.court ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={isPending}
+                    className="text-muted-foreground"
+                    onClick={handleUnassignCourt}
+                  >
+                    Unassign court
+                  </Button>
+                ) : null}
+
+                {match.ref ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={isPending}
+                    className="text-muted-foreground"
+                    onClick={handleUnassignRef}
+                  >
+                    Unassign ref
+                  </Button>
+                ) : null}
+
                 <Button
                   type="button"
                   variant="ghost"
