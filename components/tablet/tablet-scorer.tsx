@@ -344,6 +344,12 @@ export function TabletScorer({
     const finish = FINISH_TYPES.find((f) => f.id === finishType);
     if (!finish) return;
 
+    const scorer =
+      scorerPlayerId === p1.player_id ? p1 : p2;
+    const opponent =
+      scorerPlayerId === p1.player_id ? p2 : p1;
+    showFinishToast(scorer.display_name, opponent.display_name, finish);
+
     const temp: FinishEventRow = {
       id: `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       match_id: matchCtx.match.id,
@@ -434,6 +440,7 @@ export function TabletScorer({
             total={totals.p1Total}
             counts={totals.finishCounts1}
             fouls={state.foulsBy1}
+            warnings={state.warningsBy1}
           />
           <PlayerSummaryCard
             name={p2.display_name}
@@ -441,6 +448,7 @@ export function TabletScorer({
             total={totals.p2Total}
             counts={totals.finishCounts2}
             fouls={state.foulsBy2}
+            warnings={state.warningsBy2}
           />
         </div>
 
@@ -517,6 +525,8 @@ export function TabletScorer({
           score={state?.score1 ?? 0}
           setsWon={state?.setsWon1 ?? 0}
           setsToWin={setsToWin}
+          fouls={state?.foulsBy1 ?? 0}
+          warnings={state?.warningsBy1 ?? 0}
           accent="p1"
         />
         <div className="flex flex-col items-center px-2">
@@ -532,6 +542,8 @@ export function TabletScorer({
           score={state?.score2 ?? 0}
           setsWon={state?.setsWon2 ?? 0}
           setsToWin={setsToWin}
+          fouls={state?.foulsBy2 ?? 0}
+          warnings={state?.warningsBy2 ?? 0}
           accent="p2"
           align="right"
         />
@@ -583,11 +595,33 @@ function PendingPlayerColumn({
   );
 }
 
+function showFinishToast(
+  scorerName: string,
+  opponentName: string,
+  finish: (typeof FINISH_TYPES)[number]
+) {
+  if (finish.id === "WRN") {
+    toast.warning(`${scorerName} warned (no points)`, { duration: 2500 });
+    return;
+  }
+  if (finish.id === "PEN") {
+    toast.warning(`${scorerName} penalty — ${opponentName} +1`, {
+      duration: 3000,
+    });
+    return;
+  }
+  toast.success(`${scorerName} +${finish.points} (${finish.id})`, {
+    duration: 2000,
+  });
+}
+
 function ScoreColumn({
   name,
   score,
   setsWon,
   setsToWin,
+  fouls,
+  warnings,
   accent,
   align = "left",
 }: {
@@ -595,6 +629,8 @@ function ScoreColumn({
   score: number;
   setsWon: number;
   setsToWin: number;
+  fouls: number;
+  warnings: number;
   accent: "p1" | "p2";
   align?: "left" | "right";
 }) {
@@ -616,6 +652,15 @@ function ScoreColumn({
       <p className="mt-2 text-[12px] text-muted-foreground">
         Sets: {setsWon}/{setsToWin}
       </p>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Fouls:{" "}
+        <span className={fouls > 0 ? "text-amber-400" : undefined}>{fouls}</span>
+        {" · "}
+        Warnings:{" "}
+        <span className={warnings > 0 ? "text-amber-400/90" : undefined}>
+          {warnings}
+        </span>
+      </p>
     </div>
   );
 }
@@ -630,33 +675,71 @@ function FinishGrid({
   onPick: (id: FinishTypeId) => void;
 }) {
   const isP1 = accent === "p1";
+  const [flashId, setFlashId] = useState<FinishTypeId | null>(null);
+
   return (
     <div className="grid grid-cols-3 gap-2 content-start">
       {FINISH_TYPES.map((finish) => {
         const isPen = finish.id === "PEN";
-        const style: CSSProperties = isPen
-          ? {
-              background: "rgba(245,158,11,0.12)",
-              border: "1px solid rgba(245,158,11,0.4)",
-            }
-          : isP1
+        const isWrn = finish.id === "WRN";
+        const flashing = flashId === finish.id;
+        const style: CSSProperties = flashing
+          ? isPen || isWrn
             ? {
-                background: "rgba(167,139,250,0.08)",
-                border: "1px solid rgba(167,139,250,0.25)",
+                background: "rgba(245,158,11,0.55)",
+                border: "1px solid rgba(251,191,36,0.95)",
+                boxShadow: "0 0 0 2px rgba(245,158,11,0.45)",
               }
-            : {
-                background: "rgba(34,211,238,0.08)",
-                border: "1px solid rgba(34,211,238,0.25)",
-              };
+            : isP1
+              ? {
+                  background: "rgba(167,139,250,0.55)",
+                  border: "1px solid rgba(196,181,253,0.95)",
+                  boxShadow: "0 0 0 2px rgba(167,139,250,0.45)",
+                }
+              : {
+                  background: "rgba(34,211,238,0.5)",
+                  border: "1px solid rgba(103,232,249,0.95)",
+                  boxShadow: "0 0 0 2px rgba(34,211,238,0.45)",
+                }
+          : isPen
+            ? {
+                background: "rgba(245,158,11,0.12)",
+                border: "1px solid rgba(245,158,11,0.4)",
+              }
+            : isWrn
+              ? {
+                  background: "rgba(245,158,11,0.08)",
+                  border: "1px solid rgba(245,158,11,0.3)",
+                }
+              : isP1
+                ? {
+                    background: "rgba(167,139,250,0.08)",
+                    border: "1px solid rgba(167,139,250,0.25)",
+                  }
+                : {
+                    background: "rgba(34,211,238,0.08)",
+                    border: "1px solid rgba(34,211,238,0.25)",
+                  };
         return (
           <button
             key={finish.id}
             type="button"
             disabled={disabled}
-            onClick={() => onPick(finish.id)}
-            className="flex min-h-20 min-w-[100px] flex-col items-center justify-center rounded-[10px] text-white transition-opacity disabled:opacity-40"
+            onClick={() => {
+              setFlashId(finish.id);
+              window.setTimeout(() => {
+                setFlashId((cur) => (cur === finish.id ? null : cur));
+              }, 250);
+              onPick(finish.id);
+            }}
+            className="relative flex min-h-20 min-w-[100px] flex-col items-center justify-center rounded-[10px] text-white transition-[background,border,box-shadow,transform] duration-150 disabled:opacity-40"
             style={style}
           >
+            {flashing ? (
+              <span className="absolute right-1.5 top-1.5 text-[11px] font-black text-white">
+                ✓
+              </span>
+            ) : null}
             <span className="text-xl font-black tracking-wide">{finish.id}</span>
             <span className="mt-0.5 text-[12px] text-white/70">
               +{finish.points}
@@ -674,12 +757,14 @@ function PlayerSummaryCard({
   total,
   counts,
   fouls,
+  warnings,
 }: {
   name: string;
   accent: "p1" | "p2";
   total: number;
   counts: Record<FinishTypeId, number>;
   fouls: number;
+  warnings: number;
 }) {
   const color = accent === "p1" ? "var(--scorer-p1)" : "var(--scorer-p2)";
   return (
@@ -698,6 +783,8 @@ function PlayerSummaryCard({
       </p>
       <p className="mt-1 text-[11px] text-muted-foreground">
         Fouls <span className="text-amber-400">{fouls}</span>
+        {" · "}
+        Warnings <span className="text-amber-400/90">{warnings}</span>
       </p>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {FINISH_TYPES.map((f) => (

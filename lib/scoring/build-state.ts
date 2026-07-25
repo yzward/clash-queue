@@ -38,6 +38,8 @@ export type MatchScoreState = {
   lastEventId: string | null;
   foulsBy1: number;
   foulsBy2: number;
+  warningsBy1: number;
+  warningsBy2: number;
 };
 
 export type SetBreakdownRow = {
@@ -96,13 +98,21 @@ export function buildState(
   let lastEventId: string | null = null;
   let foulsBy1 = 0;
   let foulsBy2 = 0;
+  let warningsBy1 = 0;
+  let warningsBy2 = 0;
 
   for (const ev of events) {
     if (matchComplete) break;
 
     const pts = eventPoints(ev);
     const isPen = ev.finish_type === "PEN";
+    const isWrn = ev.finish_type === "WRN";
     const scorerIsP1 = ev.scorer_player_id === p1Id;
+
+    if (isWrn) {
+      if (scorerIsP1) warningsBy1 += 1;
+      else warningsBy2 += 1;
+    }
 
     if (isPen) {
       if (scorerIsP1) foulsBy1 += 1;
@@ -149,6 +159,8 @@ export function buildState(
     lastEventId,
     foulsBy1,
     foulsBy2,
+    warningsBy1,
+    warningsBy2,
   };
 }
 
