@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
+import { ChevronDown, Loader2, Users } from "lucide-react";
 import {
   useEffect,
   useEffectEvent,
@@ -12,7 +12,9 @@ import { toast } from "sonner";
 
 import {
   bulkAddEntrantsAction,
+  getTeamRosterAction,
   listPlayersForBulkPickerAction,
+  listTeamsAction,
 } from "@/app/t/[id]/actions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -24,9 +26,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import type { Entrant } from "@/lib/data/entrants";
 import type { BulkPickerPlayer } from "@/lib/data/players";
+import type { TeamListItem } from "@/lib/data/teams";
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -60,6 +69,13 @@ export function BulkAddDialog({
   const requestIdRef = useRef(0);
   const queryRef = useRef(query);
   queryRef.current = query;
+
+  const [teams, setTeams] = useState<TeamListItem[]>([]);
+  const [teamsLoaded, setTeamsLoaded] = useState(false);
+  const [teamsLoading, setTeamsLoading] = useState(false);
+  const [teamsError, setTeamsError] = useState<string | null>(null);
+  const [teamNote, setTeamNote] = useState<string | null>(null);
+  const [rosterLoading, setRosterLoading] = useState(false);
 
   const trimmed = query.trim();
   const selectedCount = selectedIds.size;
@@ -101,12 +117,89 @@ export function BulkAddDialog({
     setSelectedMeta(new Map());
     setSearchError(null);
     setSubmitError(null);
+    setTeamNote(null);
+    setTeams([]);
+    setTeamsLoaded(false);
+    setTeamsError(null);
     setSearching(true);
     const frame = window.requestAnimationFrame(() => {
       inputRef.current?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
   }, [open]);
+
+  const loadTeams = () => {
+    if (teamsLoaded || teamsLoading) return;
+    setTeamsLoading(true);
+    setTeamsError(null);
+    startTransition(async () => {
+      const result = await listTeamsAction();
+      setTeamsLoading(false);
+      if (!result.ok) {
+        setTeamsError(result.error);
+        return;
+      }
+      setTeams(result.teams);
+      setTeamsLoaded(true);
+    });
+  };
+
+  const selectTeam = (team: TeamListItem) => {
+    if (rosterLoading || pending) return;
+    setRosterLoading(true);
+    setTeamNote(null);
+
+    startTransition(async () => {
+      const result = await getTeamRosterAction(team.id, tournamentId);
+      setRosterLoading(false);
+
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+
+      if (result.pickable.length === 0 && result.alreadyRegistered === 0) {
+        toast.message("This team has no roster members");
+        return;
+      }
+
+      if (result.pickable.length === 0) {
+        setTeamNote(
+          `${result.teamName}: 0 selected · ${result.alreadyRegistered} already registered`
+        );
+        toast.message(
+          `${result.teamName}: all ${result.alreadyRegistered} members already registered`
+        );
+        return;
+      }
+
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const p of result.pickable) next.add(p.id);
+        return next;
+      });
+      setSelectedMeta((prev) => {
+        const next = new Map(prev);
+        for (const p of result.pickable) {
+          next.set(p.id, {
+            id: p.id,
+            display_name: p.display_name,
+            username: p.username,
+            discord_id: p.discord_id,
+          });
+        }
+        return next;
+      });
+
+      const parts = [
+        `${result.teamName}: ${result.pickable.length} players selected`,
+      ];
+      if (result.alreadyRegistered > 0) {
+        parts.push(`${result.alreadyRegistered} already registered, skipped`);
+      }
+      setTeamNote(parts.join(" · "));
+    });
+  };
 
   const togglePlayer = (player: BulkPickerPlayer) => {
     setSelectedIds((prev) => {
@@ -126,6 +219,7 @@ export function BulkAddDialog({
   const clearSelection = () => {
     setSelectedIds(new Set());
     setSelectedMeta(new Map());
+    setTeamNote(null);
   };
 
   const submit = () => {
@@ -152,7 +246,8 @@ export function BulkAddDialog({
     });
   };
 
-  const showEmptyQueryHint = trimmed.length >= 2 && players.length === 0 && !searching && !searchError;
+  const showEmptyQueryHint =
+    trimmed.length >= 2 && players.length === 0 && !searching && !searchError;
   const showRefineHint = players.length >= 40;
 
   return (
@@ -162,39 +257,101 @@ export function BulkAddDialog({
           <DialogTitle>Bulk add players</DialogTitle>
           <DialogDescription className="text-[11px]">
             Select multiple players to register at once. Players already in this
-            tournament are hidden.
+            tournament are hidden. Use Add team to pre-select a roster.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3">
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="bulk-player-search"
-                className="text-xs font-medium text-muted-foreground"
-              >
-                Search players
-              </label>
-              {searching ? (
-                <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-                  <Loader2 className="size-3 animate-spin" />
-                  Searching...
-                </span>
-              ) : null}
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="bulk-player-search"
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  Search players
+                </label>
+                {searching ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    Searching...
+                  </span>
+                ) : null}
+              </div>
+              <Input
+                ref={inputRef}
+                id="bulk-player-search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Type a name..."
+                disabled={pending}
+                autoFocus
+              />
             </div>
-            <Input
-              ref={inputRef}
-              id="bulk-player-search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Type a name..."
-              disabled={pending}
-              autoFocus
-            />
+
+            <DropdownMenu
+              onOpenChange={(next) => {
+                if (next) loadTeams();
+              }}
+            >
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={pending || rosterLoading}
+                  className="shrink-0 gap-1.5 border-white/15"
+                >
+                  {rosterLoading ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Users className="size-3.5" />
+                  )}
+                  Add team
+                  <ChevronDown className="size-3.5 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                className="max-h-[280px] w-[260px] overflow-y-auto"
+              >
+                {teamsLoading && !teamsLoaded ? (
+                  <p className="px-2 py-3 text-[11px] text-muted-foreground">
+                    Loading teams…
+                  </p>
+                ) : teamsError ? (
+                  <p className="px-2 py-3 text-[11px] text-destructive">
+                    {teamsError}
+                  </p>
+                ) : teams.length === 0 ? (
+                  <p className="px-2 py-3 text-[11px] text-muted-foreground">
+                    No teams found
+                  </p>
+                ) : (
+                  teams.map((team) => (
+                    <DropdownMenuItem
+                      key={team.id}
+                      disabled={rosterLoading}
+                      onClick={() => selectTeam(team)}
+                      className="flex items-center justify-between gap-2"
+                    >
+                      <span className="truncate">{team.name}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {team.member_count}
+                      </span>
+                    </DropdownMenuItem>
+                  ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
+          {teamNote ? (
+            <p className="text-[11px] text-muted-foreground">{teamNote}</p>
+          ) : null}
+
           {selectedCount > 0 ? (
-            <div className="flex items-center justify-between gap-2 rounded-[6px] px-2.5 py-1.5 text-[11px] text-muted-foreground"
+            <div
+              className="flex items-center justify-between gap-2 rounded-[6px] px-2.5 py-1.5 text-[11px] text-muted-foreground"
               style={{ background: "rgba(255,255,255,0.03)" }}
             >
               <span>
@@ -327,7 +484,7 @@ export function BulkAddDialog({
             disabled={pending || selectedCount === 0}
             className="gap-1.5"
           >
-            {pending ? (
+            {pending && !rosterLoading && !teamsLoading ? (
               <>
                 <Loader2 className="size-3.5 animate-spin" />
                 Adding…

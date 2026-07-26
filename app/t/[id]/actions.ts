@@ -32,6 +32,12 @@ import {
   type PlayerSearchResult,
 } from "@/lib/data/players";
 import {
+  getTeamRosterForBulkAdd,
+  listTeams,
+  type TeamListItem,
+  type TeamRosterPlayer,
+} from "@/lib/data/teams";
+import {
   CHALLONGE_PUSH_BLOCKED_STATES,
   CHALLONGE_STARTED_STATES,
   ChallongePushError,
@@ -350,6 +356,70 @@ export async function bulkAddEntrantsAction(
       err instanceof Error ? err.message : "Failed to bulk add players";
     console.error("[bulkAddEntrantsAction]", err);
     return { ok: false, error: message };
+  }
+}
+
+export type ListTeamsActionResult =
+  | { ok: true; teams: TeamListItem[] }
+  | { ok: false; error: string };
+
+export async function listTeamsAction(): Promise<ListTeamsActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const teams = await listTeams();
+    return { ok: true, teams };
+  } catch (err) {
+    console.error("[listTeamsAction]", err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Failed to list teams",
+    };
+  }
+}
+
+export type GetTeamRosterActionResult =
+  | {
+      ok: true;
+      teamName: string;
+      pickable: TeamRosterPlayer[];
+      alreadyRegistered: number;
+    }
+  | { ok: false; error: string };
+
+export async function getTeamRosterAction(
+  teamId: string,
+  tournamentId: string
+): Promise<GetTeamRosterActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  if (!teamId.trim()) {
+    return { ok: false, error: "Team is required" };
+  }
+
+  try {
+    const result = await getTeamRosterForBulkAdd(teamId, tournamentId);
+    if (!result.teamName) {
+      return { ok: false, error: "Team not found" };
+    }
+    return {
+      ok: true,
+      teamName: result.teamName,
+      pickable: result.pickable,
+      alreadyRegistered: result.alreadyRegistered,
+    };
+  } catch (err) {
+    console.error("[getTeamRosterAction]", err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Failed to load team roster",
+    };
   }
 }
 
