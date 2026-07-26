@@ -785,10 +785,15 @@ async function assertMatchInTournament(
   admin: ReturnType<typeof createAdminClient>,
   matchId: string,
   tournamentId: string
-): Promise<{ id: string; court_id: string | null; ref_id: string | null } | null> {
+): Promise<{
+  id: string;
+  court_id: string | null;
+  ref_id: string | null;
+  status: string | null;
+} | null> {
   const { data, error } = await admin
     .from("matches")
-    .select("id, court_id, ref_id, tournament_id")
+    .select("id, court_id, ref_id, status, tournament_id")
     .eq("id", matchId)
     .maybeSingle();
 
@@ -801,6 +806,7 @@ async function assertMatchInTournament(
     id: String(data.id),
     court_id: (data.court_id as string | null) ?? null,
     ref_id: (data.ref_id as string | null) ?? null,
+    status: (data.status as string | null) ?? null,
   };
 }
 
@@ -985,6 +991,36 @@ export async function reassignCourt(
   tournamentId: string
 ): Promise<AssignCourtResult> {
   // Same path as assign — clears old court, then conditionally claims the new one.
+  return assignCourtToMatch(matchId, newCourtId, tournamentId);
+}
+
+const SWITCHABLE_STATUSES = new Set(["pending", "in_progress", "grabbed"]);
+
+/**
+ * Move a pending or in-progress match to another free court.
+ * Preserves finish_events (keyed by match_id). Clears old court occupancy
+ * and claims the new court atomically enough for TO ops.
+ */
+export async function switchMatchCourt(
+  matchId: string,
+  newCourtId: string,
+  tournamentId: string
+): Promise<AssignCourtResult> {
+  const admin = createAdminClient();
+  const match = await assertMatchInTournament(admin, matchId, tournamentId);
+  if (!match) {
+    return { ok: false, error: "not_found", message: "Match not found" };
+  }
+
+  const status = String(match.status ?? "");
+  if (!SWITCHABLE_STATUSES.has(status)) {
+    return {
+      ok: false,
+      error: "invalid_status",
+      message: `Cannot switch court for a ${status || "unknown"} match`,
+    };
+  }
+
   return assignCourtToMatch(matchId, newCourtId, tournamentId);
 }
 

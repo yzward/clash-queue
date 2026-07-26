@@ -14,19 +14,29 @@ import {
   ChevronUp,
   Loader2,
   MoreHorizontal,
+  Search,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
   assignCourtAction,
   checkNewMatchesAvailableAction,
-  reassignCourtAction,
   refreshMatchesTabAction,
+  switchMatchCourtAction,
   syncMatchesAction,
   unassignCourtAction,
 } from "@/app/t/[id]/actions";
 import { MatchDetailDrawer } from "@/components/match-detail-drawer";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,6 +46,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
   CourtWithStatus,
@@ -44,6 +55,16 @@ import type {
 import type { TournamentDetail } from "@/lib/data/tournament-detail";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+
+type SubmittedSort = "recent" | "round" | "player";
+
+type SwitchCourtConfirm = {
+  matchId: string;
+  matchup: string;
+  oldCourtName: string;
+  newCourtId: string;
+  newCourtName: string;
+};
 
 type TabState = {
   matches: MatchWithContext[];
@@ -99,6 +120,53 @@ function statusGroupLabel(
 
 function freeCourts(courts: CourtWithStatus[]): CourtWithStatus[] {
   return courts.filter((c) => !c.court.current_match_id);
+}
+
+function updatedAtMs(iso: string | null): number {
+  if (!iso) return 0;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function sortSubmittedMatches(
+  rows: MatchWithContext[],
+  sort: SubmittedSort
+): MatchWithContext[] {
+  const copy = [...rows];
+  if (sort === "recent") {
+    return copy.sort(
+      (a, b) =>
+        updatedAtMs(b.match.updated_at) - updatedAtMs(a.match.updated_at)
+    );
+  }
+  if (sort === "round") {
+    return copy.sort((a, b) => {
+      const ra = a.match.round ?? Number.MAX_SAFE_INTEGER;
+      const rb = b.match.round ?? Number.MAX_SAFE_INTEGER;
+      if (ra !== rb) return ra - rb;
+      return (
+        updatedAtMs(b.match.updated_at) - updatedAtMs(a.match.updated_at)
+      );
+    });
+  }
+  return copy.sort((a, b) => {
+    const aName = (a.players[0]?.display_name ?? "").toLowerCase();
+    const bName = (b.players[0]?.display_name ?? "").toLowerCase();
+    const cmp = aName.localeCompare(bName);
+    if (cmp !== 0) return cmp;
+    return updatedAtMs(b.match.updated_at) - updatedAtMs(a.match.updated_at);
+  });
+}
+
+function filterSubmittedByPlayer(
+  rows: MatchWithContext[],
+  query: string
+): MatchWithContext[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return rows;
+  return rows.filter((m) =>
+    m.players.some((p) => p.display_name.toLowerCase().includes(q))
+  );
 }
 
 function applyOptimistic(state: TabState, update: OptimisticUpdate): TabState {
@@ -226,14 +294,19 @@ function CourtCard({
   courtStatus,
   free,
   onSelect,
-  onReassign,
+  onSwitchCourt,
   onUnassign,
   busy = false,
 }: {
   courtStatus: CourtWithStatus;
   free: CourtWithStatus[];
   onSelect: (match: MatchWithContext) => void;
-  onReassign: (matchId: string, courtId: string, courtName: string) => void;
+  onSwitchCourt: (
+    match: MatchWithContext,
+    courtId: string,
+    courtName: string,
+    oldCourtName: string
+  ) => void;
   onUnassign: (matchId: string) => void;
   busy?: boolean;
 }) {
@@ -309,7 +382,7 @@ function CourtCard({
           <DropdownMenuContent align="end" className="min-w-[200px]">
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                Reassign to another court
+                Switch to another court
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 {otherFree.length === 0 ? (
@@ -320,10 +393,11 @@ function CourtCard({
                       key={c.court.id}
                       disabled={busy}
                       onClick={() =>
-                        onReassign(
-                          current.match.id,
+                        onSwitchCourt(
+                          current,
                           c.court.id,
-                          c.court.name
+                          c.court.name,
+                          courtStatus.court.name
                         )
                       }
                     >
@@ -464,6 +538,13 @@ export function MatchesTab({
   const [newMatchesAvailable, setNewMatchesAvailable] = useState(false);
   const [syncPending, setSyncPending] = useState(false);
   const [busyMatchId, setBusyMatchId] = useState<string | null>(null);
+  const [switchConfirm, setSwitchConfirm] =
+    useState<SwitchCourtConfirm | null>(null);
+  const [submittedSort, setSubmittedSort] =
+    useState<SubmittedSort>("recent");
+  const [submittedSearch, setSubmittedSearch] = useState("");
+  const [submittedSearchDebounced, setSubmittedSearchDebounced] =
+    useState("");
   const [, startTransition] = useTransition();
 
   const matches = optimistic.matches;
@@ -500,6 +581,21 @@ export function MatchesTab({
     }
     return groups;
   }, [matches]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      setSubmittedSearchDebounced(submittedSearch);
+    }, 150);
+    return () => window.clearTimeout(t);
+  }, [submittedSearch]);
+
+  const submittedRows = useMemo(() => {
+    const filtered = filterSubmittedByPlayer(
+      groupedAll.Submitted,
+      submittedSearchDebounced
+    );
+    return sortSubmittedMatches(filtered, submittedSort);
+  }, [groupedAll.Submitted, submittedSearchDebounced, submittedSort]);
 
   const checkNewMatches = useEffectEvent(async () => {
     if (!tournament.challonge_id) {
@@ -608,14 +704,12 @@ export function MatchesTab({
     });
   }
 
-  function handleReassignCourt(
+  function executeSwitchCourt(
     matchId: string,
     courtId: string,
-    courtName: string
+    courtName: string,
+    label: string
   ) {
-    const match = matches.find((m) => m.match.id === matchId);
-    const label = match ? matchupLabel(match) : "Match";
-
     setBusyMatchId(matchId);
     startTransition(async () => {
       applyOptimisticUpdate({
@@ -625,7 +719,7 @@ export function MatchesTab({
         courtName,
       });
       try {
-        const result = await reassignCourtAction(
+        const result = await switchMatchCourtAction(
           matchId,
           courtId,
           tournament.id
@@ -635,12 +729,44 @@ export function MatchesTab({
           refresh();
           return;
         }
-        toast.success(`Moved ${label} to ${courtName}`);
+        toast.success(`Switched ${label} to ${courtName}`);
         refresh();
       } finally {
         setBusyMatchId(null);
       }
     });
+  }
+
+  function requestSwitchCourt(
+    match: MatchWithContext,
+    courtId: string,
+    courtName: string,
+    oldCourtName: string
+  ) {
+    const label = matchupLabel(match);
+    if (isLiveStatus(match.match.status)) {
+      setSwitchConfirm({
+        matchId: match.match.id,
+        matchup: label,
+        oldCourtName,
+        newCourtId: courtId,
+        newCourtName: courtName,
+      });
+      return;
+    }
+    executeSwitchCourt(match.match.id, courtId, courtName, label);
+  }
+
+  function confirmSwitchCourt() {
+    if (!switchConfirm) return;
+    const pending = switchConfirm;
+    setSwitchConfirm(null);
+    executeSwitchCourt(
+      pending.matchId,
+      pending.newCourtId,
+      pending.newCourtName,
+      pending.matchup
+    );
   }
 
   function handleUnassignCourt(matchId: string) {
@@ -758,7 +884,7 @@ export function MatchesTab({
                   courtStatus={courtStatus}
                   free={free}
                   onSelect={selectMatch}
-                  onReassign={handleReassignCourt}
+                  onSwitchCourt={requestSwitchCourt}
                   onUnassign={handleUnassignCourt}
                   busy={
                     courtStatus.current_match != null &&
@@ -822,38 +948,122 @@ export function MatchesTab({
             </button>
           ) : (
             <div className="space-y-4">
-              {(["In progress", "Pending", "Submitted"] as const).map(
-                (group) => {
-                  const rows = groupedAll[group];
-                  if (rows.length === 0) return null;
-                  return (
-                    <div key={group}>
-                      <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-                        {group}
-                        {group === "Submitted" ? " / Completed" : ""} ·{" "}
-                        {rows.length}
-                      </p>
-                      <div className="flex flex-col gap-1.5">
-                        {rows.map((match) => (
-                          <MatchRow
-                            key={match.match.id}
-                            match={match}
-                            free={free}
-                            onSelect={selectMatch}
-                            onAssign={handleAssignCourt}
-                            showMeta
-                            showAssign={
-                              match.match.status === "pending" &&
-                              !match.match.court_id
-                            }
-                            assignPending={busyMatchId === match.match.id}
-                          />
-                        ))}
-                      </div>
+              {(["In progress", "Pending"] as const).map((group) => {
+                const rows = groupedAll[group];
+                if (rows.length === 0) return null;
+                return (
+                  <div key={group}>
+                    <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+                      {group} · {rows.length}
+                    </p>
+                    <div className="flex flex-col gap-1.5">
+                      {rows.map((match) => (
+                        <MatchRow
+                          key={match.match.id}
+                          match={match}
+                          free={free}
+                          onSelect={selectMatch}
+                          onAssign={handleAssignCourt}
+                          showMeta
+                          showAssign={
+                            match.match.status === "pending" &&
+                            !match.match.court_id
+                          }
+                          assignPending={busyMatchId === match.match.id}
+                        />
+                      ))}
                     </div>
-                  );
-                }
-              )}
+                  </div>
+                );
+              })}
+
+              {groupedAll.Submitted.length > 0 ? (
+                <div>
+                  <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+                    Submitted / Completed ·{" "}
+                    {submittedSearchDebounced.trim()
+                      ? `${submittedRows.length} of ${groupedAll.Submitted.length}`
+                      : groupedAll.Submitted.length}
+                  </p>
+
+                  <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div
+                      className="inline-flex rounded-full p-0.5"
+                      style={{
+                        background: "rgba(255,255,255,0.04)",
+                        border: "1px solid rgba(255,255,255,0.1)",
+                      }}
+                    >
+                      {(
+                        [
+                          { id: "recent", label: "Recent" },
+                          { id: "round", label: "Round" },
+                          { id: "player", label: "Player" },
+                        ] as const
+                      ).map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setSubmittedSort(opt.id)}
+                          className={cn(
+                            "rounded-full px-2.5 py-1 text-[10px] font-semibold transition-colors",
+                            submittedSort === opt.id
+                              ? "bg-[#a78bfa]/25 text-white"
+                              : "text-muted-foreground hover:text-white"
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="relative w-full sm:max-w-[260px]">
+                      <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        value={submittedSearch}
+                        onChange={(e) => setSubmittedSearch(e.target.value)}
+                        placeholder="Search submitted matches by player..."
+                        className="h-8 pr-8 pl-8 text-xs"
+                      />
+                      {submittedSearch ? (
+                        <button
+                          type="button"
+                          aria-label="Clear search"
+                          onClick={() => setSubmittedSearch("")}
+                          className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-white"
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {submittedRows.length === 0 ? (
+                    <p className="rounded-lg px-3 py-4 text-center text-[12px] text-muted-foreground"
+                      style={{
+                        background: "rgba(255,255,255,0.02)",
+                        border: "1px solid rgba(255,255,255,0.06)",
+                      }}
+                    >
+                      No submitted matches match that search
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      {submittedRows.map((match) => (
+                        <MatchRow
+                          key={match.match.id}
+                          match={match}
+                          free={free}
+                          onSelect={selectMatch}
+                          onAssign={handleAssignCourt}
+                          showMeta
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
               <button
                 type="button"
                 onClick={() => setShowAll(false)}
@@ -866,6 +1076,40 @@ export function MatchesTab({
           )}
         </section>
       </div>
+
+      <Dialog
+        open={switchConfirm != null}
+        onOpenChange={(open) => {
+          if (!open) setSwitchConfirm(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Switch court?</DialogTitle>
+            <DialogDescription>
+              {switchConfirm
+                ? `Switch ${switchConfirm.matchup} from ${switchConfirm.oldCourtName} to ${switchConfirm.newCourtName}? The tablet on ${switchConfirm.oldCourtName} will return to waiting, and ${switchConfirm.newCourtName}'s tablet will pick up this match. Scoring progress is preserved.`
+                : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setSwitchConfirm(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="bg-[#a78bfa] text-[#0a0a12] hover:bg-[#b79afc]"
+              onClick={confirmSwitchCourt}
+            >
+              Switch
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <MatchDetailDrawer
         match={selected}

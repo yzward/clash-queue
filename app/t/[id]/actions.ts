@@ -52,6 +52,7 @@ import {
   retryChallongeReport,
   reassignCourt,
   startAndGenerateMatches,
+  switchMatchCourt,
   unassignCourt,
   unassignRef,
   type AssignCourtResult,
@@ -962,6 +963,30 @@ export async function reassignCourtAction(
     console.error("[reassignCourtAction]", err);
     const message =
       err instanceof Error ? err.message : "Failed to reassign court";
+    return { ok: false, error: "unexpected", message };
+  }
+}
+
+export async function switchMatchCourtAction(
+  matchId: string,
+  newCourtId: string,
+  tournamentId: string
+): Promise<AssignCourtActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "unauthorized", message: "Not authorised" };
+  }
+
+  try {
+    const result = await switchMatchCourt(matchId, newCourtId, tournamentId);
+    if (result.ok) {
+      revalidatePath(`/t/${tournamentId}`);
+    }
+    return result;
+  } catch (err) {
+    console.error("[switchMatchCourtAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to switch court";
     return { ok: false, error: "unexpected", message };
   }
 }
