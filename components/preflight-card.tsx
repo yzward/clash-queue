@@ -131,8 +131,11 @@ function CheckFixButton({
   );
 
   if ("tab" in action) {
+    const href = action.view
+      ? `?tab=${action.tab}&view=${action.view}`
+      : `?tab=${action.tab}`;
     return (
-      <Link href={`?tab=${action.tab}`} className={className}>
+      <Link href={href} className={className}>
         {action.label}
       </Link>
     );

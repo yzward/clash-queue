@@ -34,21 +34,90 @@ import { cn } from "@/lib/utils";
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "players", label: "Players" },
-  { id: "bracket", label: "Bracket" },
-  { id: "courts", label: "Courts" },
-  { id: "tablets", label: "Tablets" },
-  { id: "matches", label: "Matches" },
+  { id: "arena", label: "Arena" },
+  { id: "zones", label: "Zones" },
   { id: "settings", label: "Settings" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+type ArenaView = "matches" | "bracket";
+type ZonesView = "courts" | "tablets";
+
+const LEGACY_TAB_REDIRECTS: Record<
+  string,
+  { tab: "arena" | "zones"; view: ArenaView | ZonesView }
+> = {
+  matches: { tab: "arena", view: "matches" },
+  bracket: { tab: "arena", view: "bracket" },
+  courts: { tab: "zones", view: "courts" },
+  tablets: { tab: "zones", view: "tablets" },
+};
+
+const ARENA_VIEWS: { id: ArenaView; label: string }[] = [
+  { id: "matches", label: "Matches" },
+  { id: "bracket", label: "Bracket" },
+];
+
+const ZONES_VIEWS: { id: ZonesView; label: string }[] = [
+  { id: "courts", label: "Courts" },
+  { id: "tablets", label: "Tablets" },
+];
+
+function firstParam(raw: string | string[] | undefined): string | undefined {
+  return Array.isArray(raw) ? raw[0] : raw;
+}
 
 function resolveTab(raw: string | string[] | undefined): TabId {
-  const value = Array.isArray(raw) ? raw[0] : raw;
+  const value = firstParam(raw);
   if (TABS.some((tab) => tab.id === value)) {
     return value as TabId;
   }
   return "overview";
+}
+
+function resolveArenaView(raw: string | string[] | undefined): ArenaView {
+  return firstParam(raw) === "bracket" ? "bracket" : "matches";
+}
+
+function resolveZonesView(raw: string | string[] | undefined): ZonesView {
+  return firstParam(raw) === "tablets" ? "tablets" : "courts";
+}
+
+function SubTabToggle({
+  views,
+  activeView,
+  hrefFor,
+}: {
+  views: { id: string; label: string }[];
+  activeView: string;
+  hrefFor: (viewId: string) => string;
+}) {
+  return (
+    <div className="mb-5 flex flex-wrap gap-1.5">
+      {views.map((view) => {
+        const isActive = activeView === view.id;
+        return (
+          <Link
+            key={view.id}
+            href={hrefFor(view.id)}
+            className={cn(
+              "rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wider transition-colors",
+              isActive
+                ? "bg-[#a78bfa]/20 text-white"
+                : "text-muted-foreground hover:bg-white/5 hover:text-white/80"
+            )}
+            style={
+              isActive
+                ? { border: "1px solid rgba(167,139,250,0.55)" }
+                : { border: "1px solid rgba(255,255,255,0.08)" }
+            }
+          >
+            {view.label}
+          </Link>
+        );
+      })}
+    </div>
+  );
 }
 
 function capitaliseFormat(value: string | null | undefined): string | null {
@@ -284,7 +353,10 @@ export default async function TournamentDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ tab?: string | string[] }>;
+  searchParams: Promise<{
+    tab?: string | string[];
+    view?: string | string[];
+  }>;
 }) {
   const auth = await requireTO();
 
@@ -296,8 +368,16 @@ export default async function TournamentDetailPage({
   }
 
   const { id } = await params;
-  const { tab: rawTab } = await searchParams;
+  const { tab: rawTab, view: rawView } = await searchParams;
+  const legacyTab = firstParam(rawTab);
+  if (legacyTab && legacyTab in LEGACY_TAB_REDIRECTS) {
+    const mapped = LEGACY_TAB_REDIRECTS[legacyTab];
+    redirect(`/t/${id}?tab=${mapped.tab}&view=${mapped.view}`);
+  }
+
   const activeTab = resolveTab(rawTab);
+  const arenaView = resolveArenaView(rawView);
+  const zonesView = resolveZonesView(rawView);
 
   const [tournament, preflight, courts, entrants, matchesWithContext] =
     await Promise.all([
@@ -366,7 +446,11 @@ export default async function TournamentDetailPage({
           const href =
             tab.id === "overview"
               ? `/t/${tournament.id}`
-              : `/t/${tournament.id}?tab=${tab.id}`;
+              : tab.id === "arena"
+                ? `/t/${tournament.id}?tab=arena&view=matches`
+                : tab.id === "zones"
+                  ? `/t/${tournament.id}?tab=zones&view=courts`
+                  : `/t/${tournament.id}?tab=${tab.id}`;
 
           return (
             <Link
@@ -408,27 +492,52 @@ export default async function TournamentDetailPage({
             tournamentCapacity={tournament.capacity}
             challongeId={tournament.challonge_id}
           />
-        ) : activeTab === "courts" ? (
-          <CourtsTab initialCourts={courts} tournamentId={tournament.id} />
-        ) : activeTab === "tablets" ? (
-          <TabletsTab
-            initialCourts={courts}
-            tournament={{ id: tournament.id, name: tournament.name }}
-          />
-        ) : activeTab === "matches" ? (
-          <MatchesTab
-            tournament={tournament}
-            initialCourts={courtStatuses}
-            initialMatches={matchesWithContext}
-          />
-        ) : activeTab === "bracket" ? (
-          <BracketTab
-            tournament={{
-              id: tournament.id,
-              name: tournament.name,
-              challonge_id: tournament.challonge_id,
-            }}
-          />
+        ) : activeTab === "arena" ? (
+          <>
+            <SubTabToggle
+              views={ARENA_VIEWS}
+              activeView={arenaView}
+              hrefFor={(viewId) =>
+                `/t/${tournament.id}?tab=arena&view=${viewId}`
+              }
+            />
+            {arenaView === "bracket" ? (
+              <BracketTab
+                tournament={{
+                  id: tournament.id,
+                  name: tournament.name,
+                  challonge_id: tournament.challonge_id,
+                }}
+              />
+            ) : (
+              <MatchesTab
+                tournament={tournament}
+                initialCourts={courtStatuses}
+                initialMatches={matchesWithContext}
+              />
+            )}
+          </>
+        ) : activeTab === "zones" ? (
+          <>
+            <SubTabToggle
+              views={ZONES_VIEWS}
+              activeView={zonesView}
+              hrefFor={(viewId) =>
+                `/t/${tournament.id}?tab=zones&view=${viewId}`
+              }
+            />
+            {zonesView === "tablets" ? (
+              <TabletsTab
+                initialCourts={courts}
+                tournament={{ id: tournament.id, name: tournament.name }}
+              />
+            ) : (
+              <CourtsTab
+                initialCourts={courts}
+                tournamentId={tournament.id}
+              />
+            )}
+          </>
         ) : activeTab === "settings" ? (
           <SettingsTab
             tournament={{

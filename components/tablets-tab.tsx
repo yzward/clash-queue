@@ -77,7 +77,9 @@ export function TabletsTab({ initialCourts, tournament }: TabletsTabProps) {
           asChild
           className="mt-5 bg-[#a78bfa] text-[#0a0a12] hover:bg-[#a78bfa]/90"
         >
-          <Link href={`/t/${tournament.id}?tab=courts`}>Go to Courts</Link>
+          <Link href={`/t/${tournament.id}?tab=zones&view=courts`}>
+            Go to Courts
+          </Link>
         </Button>
       </div>
     );

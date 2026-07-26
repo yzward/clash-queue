@@ -7,7 +7,7 @@ import {
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type FixAction =
-  | { label: string; tab: string }
+  | { label: string; tab: string; view?: string }
   | { label: string; href: string; external: true }
   | { label: string; action: "sync_participants" | "generate_matches" };
 
@@ -372,7 +372,7 @@ export async function runPreflightChecks(
           detail: "No matches in the database yet",
           fix_action: challongeId
             ? { label: "Generate matches", action: "generate_matches" }
-            : { label: "Open matches", tab: "matches" },
+            : { label: "Open matches", tab: "arena", view: "matches" },
         })
   );
 
@@ -390,7 +390,11 @@ export async function runPreflightChecks(
           severity: "red",
           title: "Courts configured",
           detail: "Add at least one court",
-          fix_action: { label: "Configure courts", tab: "courts" },
+          fix_action: {
+            label: "Configure courts",
+            tab: "zones",
+            view: "courts",
+          },
         })
   );
 
