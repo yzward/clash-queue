@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
 import { CompletedTournaments } from "@/components/dashboard/completed-tournaments";
+import { NewTournamentButton } from "@/components/dashboard/new-tournament-dialog";
 import { Button } from "@/components/ui/button";
 import { requireTO } from "@/lib/auth/require-to";
 import {
@@ -12,10 +13,6 @@ import {
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { formatNZDate, getNZTimeOfDay } from "@/lib/utils/dates";
-import { cn } from "@/lib/utils";
-
-const LOGO_CLIP =
-  "polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px))";
 
 function firstNameFromDisplayName(displayName: string | null | undefined) {
   const first = displayName?.trim().split(/\s+/)[0];
@@ -24,21 +21,6 @@ function firstNameFromDisplayName(displayName: string | null | undefined) {
 
 function rankingLabel(tournament: DashboardTournament) {
   return tournament.is_ranking_tournament ? "Ranked" : "Casual";
-}
-
-function NewTournamentButton({ className }: { className?: string }) {
-  return (
-    <Link
-      href="/tournaments/new"
-      className={cn(
-        "inline-flex items-center justify-center bg-white px-3.5 py-2 text-sm font-semibold text-[#0a0a12] transition-opacity hover:opacity-90",
-        className
-      )}
-      style={{ clipPath: LOGO_CLIP }}
-    >
-      + New tournament
-    </Link>
-  );
 }
 
 function TournamentCard({

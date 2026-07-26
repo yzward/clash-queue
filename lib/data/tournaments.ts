@@ -1,4 +1,10 @@
+import type { ChallongeTournament } from "@/lib/challonge/types";
+import {
+  getChallongeTournamentSafe,
+  parseChallongeIdentifier,
+} from "@/lib/challonge/client";
 import { runPreflightChecks } from "@/lib/preflight/checks";
+import { generateUniqueSlug, slugify } from "@/lib/slugify";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type DashboardTournament = {
@@ -313,6 +319,327 @@ export class InvalidTabletPinError extends Error {
     super(message);
     this.name = "InvalidTabletPinError";
   }
+}
+
+/** Map Challonge tournament_type → local format vocabulary. */
+export function mapChallongeFormat(tournament: ChallongeTournament): {
+  format: string;
+  stage1_format: string;
+  stage_type: "single" | "two_stage";
+  label: string;
+} {
+  const raw = tournament.tournament_type
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .trim();
+
+  let format = "single_elim";
+  let label = "Single Elim";
+  if (raw.includes("double")) {
+    format = "double_elim";
+    label = "Double Elim";
+  } else if (raw.includes("swiss")) {
+    format = "swiss";
+    label = "Swiss";
+  } else if (raw.includes("round robin") || raw.includes("roundrobin")) {
+    format = "round_robin";
+    label = "Round Robin";
+  } else if (raw.includes("single")) {
+    format = "single_elim";
+    label = "Single Elim";
+  } else if (raw) {
+    label = tournament.tournament_type;
+  }
+
+  const stage_type: "single" | "two_stage" = tournament.group_stage_enabled
+    ? "two_stage"
+    : "single";
+
+  let stage1_format = format;
+  if (tournament.group_stage_enabled && tournament.group_stage_options?.stage_type) {
+    const gst = String(tournament.group_stage_options.stage_type)
+      .toLowerCase()
+      .replace(/[_-]+/g, " ");
+    if (gst.includes("swiss")) {
+      stage1_format = "swiss";
+      label = "Swiss (group stage)";
+    } else if (gst.includes("round")) {
+      stage1_format = "round_robin";
+      label = "Round Robin (group stage)";
+    }
+  }
+
+  return {
+    format: stage_type === "two_stage" ? stage1_format : format,
+    stage1_format: stage_type === "two_stage" ? stage1_format : format,
+    stage_type,
+    label,
+  };
+}
+
+function toHeldAtDate(iso: string | null): string {
+  if (!iso) return new Date().toISOString().slice(0, 10);
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    return new Date().toISOString().slice(0, 10);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+export type CreateFromChallongePreview = {
+  parsedId: string;
+  name: string;
+  state: string;
+  format: string;
+  formatLabel: string;
+  participantCount: number;
+  matchCount: number;
+};
+
+export type CreateTournamentFromChallongeResult =
+  | {
+      ok: true;
+      tournamentId: string;
+      tournament: {
+        id: string;
+        name: string;
+        status: string;
+        challonge_id: string;
+      };
+    }
+  | {
+      ok: false;
+      error: "already_linked";
+      existing_tournament_id: string;
+      existing_tournament_name: string;
+    }
+  | {
+      ok: false;
+      error:
+        | "invalid_format"
+        | "not_found"
+        | "auth"
+        | "network"
+        | "unknown";
+      message: string;
+      parsedId?: string;
+    };
+
+/**
+ * Create a local tournaments row linked to an existing Challonge bracket.
+ * Does NOT import participants or create anything on Challonge.
+ *
+ * Insert contract mirrors CSP POST /api/tournaments/create:
+ * - name, held_at (NOT NULL), slug (unique), stage1_format (NOT NULL)
+ * - status='pending', format + stage_type, is_ranking_tournament, is_major_event
+ * - organiser_id = actor (no created_by column on shared schema)
+ * - capacity default 32; no bracket-engine auto-create (Challonge is the bracket)
+ */
+export async function createTournamentFromChallonge(
+  input: string,
+  options: { isRanking: boolean; isMajor: boolean },
+  actorPlayerId: string
+): Promise<CreateTournamentFromChallongeResult> {
+  const parsedId = parseChallongeIdentifier(input);
+  if (!parsedId) {
+    return {
+      ok: false,
+      error: "invalid_format",
+      message:
+        "That doesn't look like a Challonge URL or slug. Paste the full URL or just the slug (e.g. nl7udlbm).",
+    };
+  }
+
+  const verified = await getChallongeTournamentSafe(parsedId);
+  if (!verified.ok) {
+    return {
+      ok: false,
+      error: verified.error,
+      message: verified.message,
+      parsedId,
+    };
+  }
+
+  const admin = createAdminClient();
+  const challongeId = parsedId;
+
+  const { data: existing, error: existingError } = await admin
+    .from("tournaments")
+    .select("id, name")
+    .eq("challonge_id", challongeId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (existingError) {
+    console.error("[tournaments:createFromChallonge] existing", existingError);
+    throw new Error(
+      `Failed to check existing link: ${existingError.message}`
+    );
+  }
+  if (existing) {
+    return {
+      ok: false,
+      error: "already_linked",
+      existing_tournament_id: String(existing.id),
+      existing_tournament_name: String(existing.name),
+    };
+  }
+
+  const challonge = verified.tournament;
+  const mapped = mapChallongeFormat(challonge);
+  const heldAt = toHeldAtDate(challonge.starts_at ?? challonge.started_at);
+  const name = challonge.name.trim() || `Challonge ${challongeId}`;
+
+  const { data: slugRows, error: slugError } = await admin
+    .from("tournaments")
+    .select("slug")
+    .like("slug", `${slugify(name)}%`);
+
+  if (slugError) {
+    console.error("[tournaments:createFromChallonge] slugs", slugError);
+    throw new Error(`Failed to allocate slug: ${slugError.message}`);
+  }
+
+  const existingSlugs = (slugRows ?? [])
+    .map((r) => r.slug as string | null)
+    .filter((s): s is string => Boolean(s));
+  const slug = generateUniqueSlug(name, existingSlugs);
+
+  const { data: inserted, error: insertError } = await admin
+    .from("tournaments")
+    .insert({
+      name,
+      slug,
+      held_at: heldAt,
+      challonge_id: challongeId,
+      format: mapped.format,
+      stage1_format: mapped.stage1_format,
+      stage_type: mapped.stage_type,
+      stage2_format: null,
+      status: "pending",
+      is_ranking_tournament: options.isRanking,
+      is_major_event: options.isMajor,
+      capacity: 32,
+      organiser_id: actorPlayerId,
+      location: null,
+      description: null,
+    })
+    .select("id, name, status, challonge_id")
+    .single();
+
+  if (insertError || !inserted) {
+    console.error("[tournaments:createFromChallonge] insert", insertError);
+    // Race: another TO linked the same Challonge id between check and insert.
+    if (insertError?.code === "23505") {
+      const { data: raced } = await admin
+        .from("tournaments")
+        .select("id, name")
+        .eq("challonge_id", challongeId)
+        .is("deleted_at", null)
+        .maybeSingle();
+      if (raced) {
+        return {
+          ok: false,
+          error: "already_linked",
+          existing_tournament_id: String(raced.id),
+          existing_tournament_name: String(raced.name),
+        };
+      }
+    }
+    throw new Error(
+      `Failed to create tournament: ${insertError?.message ?? "unknown"}`
+    );
+  }
+
+  return {
+    ok: true,
+    tournamentId: String(inserted.id),
+    tournament: {
+      id: String(inserted.id),
+      name: String(inserted.name),
+      status: String(inserted.status),
+      challonge_id: String(inserted.challonge_id),
+    },
+  };
+}
+
+export async function previewChallongeForCreate(
+  input: string
+): Promise<
+  | { ok: true; preview: CreateFromChallongePreview }
+  | {
+      ok: false;
+      error:
+        | "invalid_format"
+        | "not_found"
+        | "auth"
+        | "network"
+        | "unknown"
+        | "already_linked";
+      message: string;
+      parsedId?: string;
+      existing_tournament_id?: string;
+      existing_tournament_name?: string;
+    }
+> {
+  const parsedId = parseChallongeIdentifier(input);
+  if (!parsedId) {
+    return {
+      ok: false,
+      error: "invalid_format",
+      message:
+        "That doesn't look like a Challonge URL or slug. Paste the full URL or just the slug (e.g. nl7udlbm).",
+    };
+  }
+
+  const verified = await getChallongeTournamentSafe(parsedId);
+  if (!verified.ok) {
+    return {
+      ok: false,
+      error: verified.error,
+      message: verified.message,
+      parsedId,
+    };
+  }
+
+  const admin = createAdminClient();
+  const { data: existing, error: existingError } = await admin
+    .from("tournaments")
+    .select("id, name")
+    .eq("challonge_id", parsedId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (existingError) {
+    console.error("[tournaments:previewCreate] existing", existingError);
+    throw new Error(
+      `Failed to check existing link: ${existingError.message}`
+    );
+  }
+  if (existing) {
+    return {
+      ok: false,
+      error: "already_linked",
+      message: "This Challonge bracket is already linked to a Clash Queue tournament.",
+      parsedId,
+      existing_tournament_id: String(existing.id),
+      existing_tournament_name: String(existing.name),
+    };
+  }
+
+  const mapped = mapChallongeFormat(verified.tournament);
+  return {
+    ok: true,
+    preview: {
+      parsedId,
+      name: verified.tournament.name,
+      state: verified.tournament.state,
+      format: mapped.format,
+      formatLabel: mapped.label,
+      participantCount: verified.tournament.participants_count,
+      matchCount: verified.tournament.matches_count,
+    },
+  };
 }
 
 /**
