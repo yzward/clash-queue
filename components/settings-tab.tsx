@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import {
   linkChallongeAction,
   setTabletPinAction,
+  setTournamentTypeAction,
   unlinkChallongeAction,
   verifyChallongeLinkAction,
   type ChallongePreview,
@@ -21,6 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 
 type SettingsTournament = {
   id: string;
@@ -28,6 +30,8 @@ type SettingsTournament = {
   challonge_id: string | null;
   /** True when a PIN is stored — never pass the raw digits into this UI. */
   tabletPinSet: boolean;
+  isRankingTournament: boolean;
+  isMajorEvent: boolean;
 };
 
 const PIN_RE = /^[0-9]{4}$/;
@@ -63,6 +67,8 @@ export function SettingsTab({
 }) {
   const [linkedId, setLinkedId] = useState(tournament.challonge_id);
   const [pinSet, setPinSet] = useState(tournament.tabletPinSet);
+  const [isRanking, setIsRanking] = useState(tournament.isRankingTournament);
+  const [isMajor, setIsMajor] = useState(tournament.isMajorEvent);
   const [input, setInput] = useState("");
   const [preview, setPreview] = useState<ChallongePreview | null>(null);
   const [verifiedInput, setVerifiedInput] = useState<string | null>(null);
@@ -79,6 +85,7 @@ export function SettingsTab({
   const [pinError, setPinError] = useState<string | null>(null);
   const pinInputRef = useRef<HTMLInputElement>(null);
   const [pending, startTransition] = useTransition();
+  const [typePending, startTypeTransition] = useTransition();
   const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
@@ -88,6 +95,47 @@ export function SettingsTab({
   useEffect(() => {
     setPinSet(tournament.tabletPinSet);
   }, [tournament.tabletPinSet]);
+
+  useEffect(() => {
+    setIsRanking(tournament.isRankingTournament);
+  }, [tournament.isRankingTournament]);
+
+  useEffect(() => {
+    setIsMajor(tournament.isMajorEvent);
+  }, [tournament.isMajorEvent]);
+
+  function updateTournamentType(patch: {
+    isRanking?: boolean;
+    isMajor?: boolean;
+  }) {
+    const prevRanking = isRanking;
+    const prevMajor = isMajor;
+    if (patch.isRanking !== undefined) setIsRanking(patch.isRanking);
+    if (patch.isMajor !== undefined) setIsMajor(patch.isMajor);
+
+    startTypeTransition(async () => {
+      const result = await setTournamentTypeAction(tournament.id, patch);
+      if (!result.ok) {
+        setIsRanking(prevRanking);
+        setIsMajor(prevMajor);
+        toast.error(result.error);
+        return;
+      }
+      setIsRanking(result.tournament.is_ranking_tournament !== false);
+      setIsMajor(result.tournament.is_major_event);
+      if (patch.isRanking !== undefined) {
+        toast.success(
+          patch.isRanking
+            ? "Tournament marked Ranked"
+            : "Tournament marked Casual"
+        );
+      } else if (patch.isMajor !== undefined) {
+        toast.success(
+          patch.isMajor ? "Marked as Major event" : "Major event tag removed"
+        );
+      }
+    });
+  }
 
   useEffect(() => {
     if (pinDialogOpen) {
@@ -221,6 +269,104 @@ export function SettingsTab({
   return (
     <div className="space-y-4">
       <h2 className="text-[14px] font-medium text-white">Settings</h2>
+
+      <div
+        className="rounded-[10px] p-4"
+        style={{
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-medium text-white">Tournament type</h3>
+          {typePending ? (
+            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+          ) : null}
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Ranking
+            </p>
+            <div
+              className="mt-2 inline-flex rounded-full p-0.5"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.1)",
+              }}
+            >
+              <button
+                type="button"
+                disabled={typePending}
+                onClick={() => {
+                  if (!isRanking) updateTournamentType({ isRanking: true });
+                }}
+                className={cn(
+                  "rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-60",
+                  isRanking
+                    ? "bg-[#a78bfa]/25 text-white"
+                    : "text-muted-foreground hover:text-white"
+                )}
+              >
+                Ranked
+              </button>
+              <button
+                type="button"
+                disabled={typePending}
+                onClick={() => {
+                  if (isRanking) updateTournamentType({ isRanking: false });
+                }}
+                className={cn(
+                  "rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-60",
+                  !isRanking
+                    ? "bg-[#a78bfa]/25 text-white"
+                    : "text-muted-foreground hover:text-white"
+                )}
+              >
+                Casual
+              </button>
+            </div>
+            <p className="mt-2 text-[12px] text-muted-foreground">
+              Ranked tournaments award CLP points and affect player rankings.
+            </p>
+          </div>
+
+          <div
+            className="flex items-start justify-between gap-3 rounded-[8px] px-3 py-2.5"
+            style={{
+              background: "rgba(255,255,255,0.02)",
+              border: "1px solid rgba(255,255,255,0.06)",
+            }}
+          >
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-white">Major event</p>
+              <p className="mt-0.5 text-[12px] text-muted-foreground">
+                Flags this as a major event (e.g. Nationals, ABO). Used for
+                display and highlighting.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isMajor}
+              disabled={typePending}
+              onClick={() => updateTournamentType({ isMajor: !isMajor })}
+              className={cn(
+                "relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-60",
+                isMajor ? "bg-[#fbbf24]" : "bg-white/15"
+              )}
+            >
+              <span
+                className={cn(
+                  "absolute top-0.5 size-5 rounded-full bg-white transition-transform",
+                  isMajor ? "translate-x-[22px]" : "translate-x-0.5"
+                )}
+              />
+            </button>
+          </div>
+        </div>
+      </div>
 
       <div
         className="rounded-[10px] p-4"

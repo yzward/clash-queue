@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
-import { Trophy } from "lucide-react";
+import { Loader2, Trophy } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -458,9 +458,13 @@ export function MatchDetailDrawer({
                       type="button"
                       variant="ghost"
                       disabled={isPending}
-                      className="border border-white/15"
+                      className="cursor-pointer border border-white/15 transition-colors hover:border-white/30 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed"
                     >
-                      Assign court
+                      {isPending ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        "Assign court"
+                      )}
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="min-w-[180px]">
@@ -493,9 +497,13 @@ export function MatchDetailDrawer({
                       type="button"
                       variant="ghost"
                       disabled={isPending}
-                      className="border border-white/15"
+                      className="cursor-pointer border border-white/15 transition-colors hover:border-white/30 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed"
                     >
-                      Assign ref
+                      {isPending ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        "Assign ref"
+                      )}
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent

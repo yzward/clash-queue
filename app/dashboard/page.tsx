@@ -90,9 +90,23 @@ function TournamentCard({
       </span>
 
       <div className="min-w-0 flex-1">
-        <p className="truncate text-[13px] font-medium text-white sm:text-sm">
-          {tournament.name}
-        </p>
+        <div className="flex min-w-0 items-center gap-2">
+          <p className="truncate text-[13px] font-medium text-white sm:text-sm">
+            {tournament.name}
+          </p>
+          {tournament.is_major_event ? (
+            <span
+              className="inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider"
+              style={{
+                background: "rgba(251,191,36,0.15)",
+                color: "#fcd34d",
+                border: "1px solid rgba(251,191,36,0.3)",
+              }}
+            >
+              Major
+            </span>
+          ) : null}
+        </div>
         <p className="truncate text-xs text-muted-foreground">
           {formatNZDate(tournament.held_at)} · {rankingLabel(tournament)}
         </p>

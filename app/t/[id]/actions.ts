@@ -67,9 +67,11 @@ import {
   InvalidTabletPinError,
   setTournamentChallongeId,
   setTournamentTabletPin,
+  setTournamentType,
   startTournament,
   type StartedTournament,
   type TournamentChallongeRow,
+  type TournamentTypeRow,
 } from "@/lib/data/tournaments";
 import {
   HumanitixConfigError,
@@ -1050,6 +1052,32 @@ export async function verifyChallongeLinkAction(
 export type SetTabletPinActionResult =
   | { ok: true }
   | { ok: false; error: string };
+
+export type SetTournamentTypeActionResult =
+  | { ok: true; tournament: TournamentTypeRow }
+  | { ok: false; error: string };
+
+export async function setTournamentTypeAction(
+  tournamentId: string,
+  patch: { isRanking?: boolean; isMajor?: boolean }
+): Promise<SetTournamentTypeActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const tournament = await setTournamentType(tournamentId, patch);
+    revalidatePath(`/t/${tournamentId}`);
+    revalidatePath("/dashboard");
+    return { ok: true, tournament };
+  } catch (err) {
+    console.error("[setTournamentTypeAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to update tournament type";
+    return { ok: false, error: message };
+  }
+}
 
 /**
  * Set or clear the tournament tablet PIN.

@@ -9,7 +9,12 @@ import {
   useTransition,
   type ReactNode,
 } from "react";
-import { ChevronDown, ChevronUp, MoreHorizontal } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  MoreHorizontal,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -166,10 +171,12 @@ function CourtAssignMenu({
   free,
   onAssign,
   label = "Assign",
+  pending = false,
 }: {
   free: CourtWithStatus[];
   onAssign: (courtId: string, courtName: string) => void;
   label?: string;
+  pending?: boolean;
 }) {
   return (
     <DropdownMenu>
@@ -178,10 +185,19 @@ function CourtAssignMenu({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-7 px-2 text-[10px] text-muted-foreground"
+          disabled={pending}
+          className={cn(
+            "h-7 cursor-pointer border border-transparent px-2 text-[10px] text-muted-foreground transition-colors",
+            "hover:border-white/20 hover:bg-white/10 hover:text-white",
+            "disabled:cursor-not-allowed disabled:opacity-60"
+          )}
           onClick={(e) => e.stopPropagation()}
         >
-          {label}
+          {pending ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            label
+          )}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[160px]">
@@ -191,6 +207,7 @@ function CourtAssignMenu({
           free.map((c) => (
             <DropdownMenuItem
               key={c.court.id}
+              disabled={pending}
               onClick={(e) => {
                 e.stopPropagation();
                 onAssign(c.court.id, c.court.name);
@@ -211,12 +228,14 @@ function CourtCard({
   onSelect,
   onReassign,
   onUnassign,
+  busy = false,
 }: {
   courtStatus: CourtWithStatus;
   free: CourtWithStatus[];
   onSelect: (match: MatchWithContext) => void;
   onReassign: (matchId: string, courtId: string, courtName: string) => void;
   onUnassign: (matchId: string) => void;
+  busy?: boolean;
 }) {
   const current = courtStatus.current_match;
   const occupied = Boolean(current);
@@ -224,10 +243,18 @@ function CourtCard({
   if (!occupied || !current) {
     return (
       <div
-        className="flex min-h-[86px] flex-col justify-center rounded-[10px] px-3.5 py-3"
+        className="flex min-h-[86px] cursor-pointer flex-col justify-center rounded-[10px] px-3.5 py-3 transition-colors hover:bg-white/[0.05]"
         style={{
           background: "rgba(255,255,255,0.02)",
           border: "1px dashed rgba(255,255,255,0.1)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.borderColor = "rgba(167,139,250,0.45)";
+          e.currentTarget.style.background = "rgba(167,139,250,0.06)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
+          e.currentTarget.style.background = "rgba(255,255,255,0.02)";
         }}
       >
         <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
@@ -263,11 +290,20 @@ function CourtCard({
               type="button"
               variant="ghost"
               size="icon-xs"
-              className="text-muted-foreground"
+              disabled={busy}
+              className={cn(
+                "cursor-pointer border border-transparent text-muted-foreground transition-colors",
+                "hover:border-white/20 hover:bg-white/10 hover:text-white",
+                "disabled:cursor-not-allowed disabled:opacity-60"
+              )}
               onClick={(e) => e.stopPropagation()}
               aria-label="Court actions"
             >
-              <MoreHorizontal className="size-3.5" />
+              {busy ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <MoreHorizontal className="size-3.5" />
+              )}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-[200px]">
@@ -282,6 +318,7 @@ function CourtCard({
                   otherFree.map((c) => (
                     <DropdownMenuItem
                       key={c.court.id}
+                      disabled={busy}
                       onClick={() =>
                         onReassign(
                           current.match.id,
@@ -296,7 +333,10 @@ function CourtCard({
                 )}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
-            <DropdownMenuItem onClick={() => onUnassign(current.match.id)}>
+            <DropdownMenuItem
+              disabled={busy}
+              onClick={() => onUnassign(current.match.id)}
+            >
               Send back to queue
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onSelect(current)}>
@@ -342,6 +382,7 @@ function MatchRow({
   onAssign,
   showMeta,
   showAssign,
+  assignPending = false,
 }: {
   match: MatchWithContext;
   free: CourtWithStatus[];
@@ -349,6 +390,7 @@ function MatchRow({
   onAssign: (matchId: string, courtId: string, courtName: string) => void;
   showMeta?: boolean;
   showAssign?: boolean;
+  assignPending?: boolean;
 }) {
   const resolved = isResolved(match);
 
@@ -390,6 +432,7 @@ function MatchRow({
       {showAssign && resolved && !match.match.court_id ? (
         <CourtAssignMenu
           free={free}
+          pending={assignPending}
           onAssign={(courtId, courtName) =>
             onAssign(match.match.id, courtId, courtName)
           }
@@ -420,6 +463,7 @@ export function MatchesTab({
   const [showAll, setShowAll] = useState(false);
   const [newMatchesAvailable, setNewMatchesAvailable] = useState(false);
   const [syncPending, setSyncPending] = useState(false);
+  const [busyMatchId, setBusyMatchId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
   const matches = optimistic.matches;
@@ -537,6 +581,7 @@ export function MatchesTab({
     const match = matches.find((m) => m.match.id === matchId);
     const label = match ? matchupLabel(match) : "Match";
 
+    setBusyMatchId(matchId);
     startTransition(async () => {
       applyOptimisticUpdate({
         type: "assign_court",
@@ -544,22 +589,22 @@ export function MatchesTab({
         courtId,
         courtName,
       });
-      const result = await assignCourtAction(
-        matchId,
-        courtId,
-        tournament.id
-      );
-      if (!result.ok) {
-        if (result.error === "court_occupied") {
+      try {
+        const result = await assignCourtAction(
+          matchId,
+          courtId,
+          tournament.id
+        );
+        if (!result.ok) {
           toast.error(result.message);
-        } else {
-          toast.error(result.message);
+          refresh();
+          return;
         }
+        toast.success(`Assigned ${label} to ${courtName}`);
         refresh();
-        return;
+      } finally {
+        setBusyMatchId(null);
       }
-      toast.success(`Assigned ${label} to ${courtName}`);
-      refresh();
     });
   }
 
@@ -571,6 +616,7 @@ export function MatchesTab({
     const match = matches.find((m) => m.match.id === matchId);
     const label = match ? matchupLabel(match) : "Match";
 
+    setBusyMatchId(matchId);
     startTransition(async () => {
       applyOptimisticUpdate({
         type: "assign_court",
@@ -578,18 +624,22 @@ export function MatchesTab({
         courtId,
         courtName,
       });
-      const result = await reassignCourtAction(
-        matchId,
-        courtId,
-        tournament.id
-      );
-      if (!result.ok) {
-        toast.error(result.message);
+      try {
+        const result = await reassignCourtAction(
+          matchId,
+          courtId,
+          tournament.id
+        );
+        if (!result.ok) {
+          toast.error(result.message);
+          refresh();
+          return;
+        }
+        toast.success(`Moved ${label} to ${courtName}`);
         refresh();
-        return;
+      } finally {
+        setBusyMatchId(null);
       }
-      toast.success(`Moved ${label} to ${courtName}`);
-      refresh();
     });
   }
 
@@ -597,16 +647,21 @@ export function MatchesTab({
     const match = matches.find((m) => m.match.id === matchId);
     const label = match ? matchupLabel(match) : "Match";
 
+    setBusyMatchId(matchId);
     startTransition(async () => {
       applyOptimisticUpdate({ type: "unassign_court", matchId });
-      const result = await unassignCourtAction(matchId, tournament.id);
-      if (!result.ok) {
-        toast.error(result.message);
+      try {
+        const result = await unassignCourtAction(matchId, tournament.id);
+        if (!result.ok) {
+          toast.error(result.message);
+          refresh();
+          return;
+        }
+        toast.success(`Sent ${label} back to queue`);
         refresh();
-        return;
+      } finally {
+        setBusyMatchId(null);
       }
-      toast.success(`Sent ${label} back to queue`);
-      refresh();
     });
   }
 
@@ -705,6 +760,10 @@ export function MatchesTab({
                   onSelect={selectMatch}
                   onReassign={handleReassignCourt}
                   onUnassign={handleUnassignCourt}
+                  busy={
+                    courtStatus.current_match != null &&
+                    busyMatchId === courtStatus.current_match.match.id
+                  }
                 />
               ))}
             </div>
@@ -735,6 +794,7 @@ export function MatchesTab({
                   onSelect={selectMatch}
                   onAssign={handleAssignCourt}
                   showAssign
+                  assignPending={busyMatchId === match.match.id}
                 />
               ))}
               {lockedPending.map((match) => (
@@ -786,6 +846,7 @@ export function MatchesTab({
                               match.match.status === "pending" &&
                               !match.match.court_id
                             }
+                            assignPending={busyMatchId === match.match.id}
                           />
                         ))}
                       </div>

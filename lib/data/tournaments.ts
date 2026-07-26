@@ -8,6 +8,7 @@ export type DashboardTournament = {
   held_at: string | null;
   challonge_id: string | null;
   is_ranking_tournament: boolean | null;
+  is_major_event: boolean;
   deleted_at: string | null;
 };
 
@@ -29,7 +30,7 @@ export async function getTournamentsForDashboard(): Promise<DashboardTournaments
   const { data, error } = await admin
     .from("tournaments")
     .select(
-      "id, name, status, held_at, challonge_id, is_ranking_tournament, deleted_at"
+      "id, name, status, held_at, challonge_id, is_ranking_tournament, is_major_event, deleted_at"
     )
     .is("deleted_at", null)
     .order("held_at", { ascending: false, nullsFirst: false });
@@ -42,17 +43,74 @@ export async function getTournamentsForDashboard(): Promise<DashboardTournaments
   const setup: DashboardTournament[] = [];
   const completed: DashboardTournament[] = [];
 
-  for (const row of (data ?? []) as DashboardTournament[]) {
-    if (row.status === "active" || row.status === "in_progress") {
-      live.push(row);
-    } else if (row.status === "pending") {
-      setup.push(row);
-    } else if (row.status === "completed") {
-      completed.push(row);
+  for (const row of data ?? []) {
+    const tournament: DashboardTournament = {
+      id: String(row.id),
+      name: String(row.name),
+      status: String(row.status),
+      held_at: (row.held_at as string | null) ?? null,
+      challonge_id: (row.challonge_id as string | null) ?? null,
+      is_ranking_tournament:
+        (row.is_ranking_tournament as boolean | null) ?? null,
+      is_major_event: Boolean(row.is_major_event),
+      deleted_at: (row.deleted_at as string | null) ?? null,
+    };
+    if (tournament.status === "active" || tournament.status === "in_progress") {
+      live.push(tournament);
+    } else if (tournament.status === "pending") {
+      setup.push(tournament);
+    } else if (tournament.status === "completed") {
+      completed.push(tournament);
     }
   }
 
   return { live, setup, completed };
+}
+
+export type TournamentTypeRow = {
+  id: string;
+  is_ranking_tournament: boolean | null;
+  is_major_event: boolean;
+};
+
+export async function setTournamentType(
+  tournamentId: string,
+  patch: { isRanking?: boolean; isMajor?: boolean }
+): Promise<TournamentTypeRow> {
+  if (patch.isRanking === undefined && patch.isMajor === undefined) {
+    throw new Error("No tournament type fields provided");
+  }
+
+  const admin = createAdminClient();
+  const update: Record<string, boolean> = {};
+  if (patch.isRanking !== undefined) {
+    update.is_ranking_tournament = patch.isRanking;
+  }
+  if (patch.isMajor !== undefined) {
+    update.is_major_event = patch.isMajor;
+  }
+
+  const { data, error } = await admin
+    .from("tournaments")
+    .update(update)
+    .eq("id", tournamentId)
+    .is("deleted_at", null)
+    .select("id, is_ranking_tournament, is_major_event")
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to update tournament type: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error("Tournament not found");
+  }
+
+  return {
+    id: String(data.id),
+    is_ranking_tournament:
+      (data.is_ranking_tournament as boolean | null) ?? null,
+    is_major_event: Boolean(data.is_major_event),
+  };
 }
 
 export async function setTournamentChallongeId(

@@ -427,9 +427,23 @@ export default async function TournamentDetailPage({
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h1 className="text-[20px] font-medium text-white">
-            {tournament.name}
-          </h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-[20px] font-medium text-white">
+              {tournament.name}
+            </h1>
+            {tournament.is_major_event ? (
+              <span
+                className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                style={{
+                  background: "rgba(251,191,36,0.15)",
+                  color: "#fcd34d",
+                  border: "1px solid rgba(251,191,36,0.35)",
+                }}
+              >
+                Major event
+              </span>
+            ) : null}
+          </div>
           <p className="mt-1 text-sm text-muted-foreground">
             {metaParts.join(" · ")}
           </p>
@@ -545,6 +559,8 @@ export default async function TournamentDetailPage({
               name: tournament.name,
               challonge_id: tournament.challonge_id,
               tabletPinSet: Boolean(tournament.tablet_pin),
+              isRankingTournament: tournament.is_ranking_tournament !== false,
+              isMajorEvent: tournament.is_major_event,
             }}
           />
         ) : (
