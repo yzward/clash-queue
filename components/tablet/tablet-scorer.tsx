@@ -9,7 +9,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { Loader2, Trophy } from "lucide-react";
+import { ArrowLeftRight, Loader2, Trophy } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -33,6 +33,28 @@ import { cn } from "@/lib/utils";
 const ANGULAR_CLIP =
   "polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px))";
 
+const SIDES_SWAPPED_KEY_PREFIX = "clash_tablet_sides_swapped:";
+
+/** Standard finish order: EXT on the outer-left of a column. */
+const FINISH_ORDER_STANDARD: FinishTypeId[] = [
+  "EXT",
+  "OVR",
+  "BUR",
+  "SPN",
+  "WRN",
+  "PEN",
+];
+
+/** Mirrored finish order: EXT on the outer-right of a column. */
+const FINISH_ORDER_MIRRORED: FinishTypeId[] = [
+  "BUR",
+  "OVR",
+  "EXT",
+  "PEN",
+  "WRN",
+  "SPN",
+];
+
 type Props = {
   matchCtx: TabletMatchContext;
   refPlayerId: string;
@@ -41,6 +63,27 @@ type Props = {
   onReady: () => void;
   onScoringSessionChange: (active: boolean) => void;
 };
+
+function sidesSwappedStorageKey(courtId: string): string {
+  return `${SIDES_SWAPPED_KEY_PREFIX}${courtId}`;
+}
+
+function readSidesSwapped(courtId: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return localStorage.getItem(sidesSwappedStorageKey(courtId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeSidesSwapped(courtId: string, swapped: boolean): void {
+  try {
+    localStorage.setItem(sidesSwappedStorageKey(courtId), swapped ? "1" : "0");
+  } catch {
+    // private mode / quota — ignore
+  }
+}
 
 function toScoreEvents(rows: FinishEventRow[]): ScoreEvent[] {
   return rows.map((e) => ({
@@ -108,6 +151,7 @@ export function TabletScorer({
   const [syncToHint, setSyncToHint] = useState<{
     stage: string | null;
   } | null>(null);
+  const [sidesSwapped, setSidesSwapped] = useState(false);
 
   const [optimisticEvents, addOptimistic] = useOptimistic(
     events,
@@ -146,6 +190,18 @@ export function TabletScorer({
       setShowSummary(true);
     }
   }, [matchCtx.match.id, matchCtx.match.status]);
+
+  useEffect(() => {
+    setSidesSwapped(readSidesSwapped(courtId));
+  }, [courtId]);
+
+  function toggleSidesSwapped() {
+    setSidesSwapped((prev) => {
+      const next = !prev;
+      writeSidesSwapped(courtId, next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     const active =
@@ -475,23 +531,59 @@ export function TabletScorer({
     );
   }
 
+  // Display columns: swap flips which player occupies left/right.
+  // Colours travel with the player (P1 purple, P2 cyan). Taps use the
+  // displayed player's id — never hardcode left = P1.
+  const leftPlayer = sidesSwapped ? p2 : p1;
+  const rightPlayer = sidesSwapped ? p1 : p2;
+  const leftAccent: "p1" | "p2" = sidesSwapped ? "p2" : "p1";
+  const rightAccent: "p1" | "p2" = sidesSwapped ? "p1" : "p2";
+  const leftScore = sidesSwapped ? (state?.score2 ?? 0) : (state?.score1 ?? 0);
+  const rightScore = sidesSwapped ? (state?.score1 ?? 0) : (state?.score2 ?? 0);
+  const leftSetsWon = sidesSwapped
+    ? (state?.setsWon2 ?? 0)
+    : (state?.setsWon1 ?? 0);
+  const rightSetsWon = sidesSwapped
+    ? (state?.setsWon1 ?? 0)
+    : (state?.setsWon2 ?? 0);
+  const leftFouls = sidesSwapped
+    ? (state?.foulsBy2 ?? 0)
+    : (state?.foulsBy1 ?? 0);
+  const rightFouls = sidesSwapped
+    ? (state?.foulsBy1 ?? 0)
+    : (state?.foulsBy2 ?? 0);
+  const leftWarnings = sidesSwapped
+    ? (state?.warningsBy2 ?? 0)
+    : (state?.warningsBy1 ?? 0);
+  const rightWarnings = sidesSwapped
+    ? (state?.warningsBy1 ?? 0)
+    : (state?.warningsBy2 ?? 0);
+
   if (matchStatus === "pending") {
     return (
       <div className="flex w-full max-w-lg flex-col items-center text-center">
         <div className="grid w-full grid-cols-2 gap-4">
           <PendingPlayerColumn
-            name={p1.display_name}
-            accent="p1"
+            name={leftPlayer.display_name}
+            accent={leftAccent}
           />
           <PendingPlayerColumn
-            name={p2.display_name}
-            accent="p2"
+            name={rightPlayer.display_name}
+            accent={rightAccent}
           />
         </div>
+        <button
+          type="button"
+          onClick={toggleSidesSwapped}
+          className="mt-4 inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-white/5 hover:text-white"
+        >
+          <ArrowLeftRight className="size-3.5" />
+          Swap sides
+        </button>
         <Button
           type="button"
           disabled={grabbing}
-          className="mt-10 min-h-14 w-full max-w-sm bg-[#a78bfa] text-base font-black uppercase tracking-widest text-[#0a0a12] hover:bg-[#b79afc]"
+          className="mt-6 min-h-14 w-full max-w-sm bg-[#a78bfa] text-base font-black uppercase tracking-widest text-[#0a0a12] hover:bg-[#b79afc]"
           style={{ clipPath: ANGULAR_CLIP }}
           onClick={() => void handleStart()}
         >
@@ -521,44 +613,55 @@ export function TabletScorer({
         }}
       >
         <ScoreColumn
-          name={p1.display_name}
-          score={state?.score1 ?? 0}
-          setsWon={state?.setsWon1 ?? 0}
+          name={leftPlayer.display_name}
+          score={leftScore}
+          setsWon={leftSetsWon}
           setsToWin={setsToWin}
-          fouls={state?.foulsBy1 ?? 0}
-          warnings={state?.warningsBy1 ?? 0}
-          accent="p1"
+          fouls={leftFouls}
+          warnings={leftWarnings}
+          accent={leftAccent}
         />
-        <div className="flex flex-col items-center px-2">
+        <div className="flex flex-col items-center gap-2 px-2">
           <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
             vs
           </span>
-          <span className="mt-1 text-[12px] font-black uppercase tracking-widest text-white">
+          <span className="text-[12px] font-black uppercase tracking-widest text-white">
             Set {state?.currentSet ?? 1}
           </span>
+          <button
+            type="button"
+            onClick={toggleSidesSwapped}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-white/5 hover:text-white"
+            aria-pressed={sidesSwapped}
+          >
+            <ArrowLeftRight className="size-3.5" />
+            Swap sides
+          </button>
         </div>
         <ScoreColumn
-          name={p2.display_name}
-          score={state?.score2 ?? 0}
-          setsWon={state?.setsWon2 ?? 0}
+          name={rightPlayer.display_name}
+          score={rightScore}
+          setsWon={rightSetsWon}
           setsToWin={setsToWin}
-          fouls={state?.foulsBy2 ?? 0}
-          warnings={state?.warningsBy2 ?? 0}
-          accent="p2"
+          fouls={rightFouls}
+          warnings={rightWarnings}
+          accent={rightAccent}
           align="right"
         />
       </div>
 
       <div className="grid flex-1 grid-cols-2 gap-3">
         <FinishGrid
-          accent="p1"
+          accent={leftAccent}
+          mirrored={false}
           disabled={disabled}
-          onPick={(id) => handleFinish(p1.player_id, id)}
+          onPick={(id) => handleFinish(leftPlayer.player_id, id)}
         />
         <FinishGrid
-          accent="p2"
+          accent={rightAccent}
+          mirrored
           disabled={disabled}
-          onPick={(id) => handleFinish(p2.player_id, id)}
+          onPick={(id) => handleFinish(rightPlayer.player_id, id)}
         />
       </div>
     </div>
@@ -667,19 +770,26 @@ function ScoreColumn({
 
 function FinishGrid({
   accent,
+  mirrored = false,
   disabled,
   onPick,
 }: {
   accent: "p1" | "p2";
+  /** Right-screen column uses mirrored order (EXT on the outer edge). */
+  mirrored?: boolean;
   disabled: boolean;
   onPick: (id: FinishTypeId) => void;
 }) {
   const isP1 = accent === "p1";
   const [flashId, setFlashId] = useState<FinishTypeId | null>(null);
+  const order = mirrored ? FINISH_ORDER_MIRRORED : FINISH_ORDER_STANDARD;
+  const finishById = new Map(FINISH_TYPES.map((f) => [f.id, f]));
 
   return (
     <div className="grid grid-cols-3 gap-2 content-start">
-      {FINISH_TYPES.map((finish) => {
+      {order.map((finishId) => {
+        const finish = finishById.get(finishId);
+        if (!finish) return null;
         const isPen = finish.id === "PEN";
         const isWrn = finish.id === "WRN";
         const flashing = flashId === finish.id;
