@@ -2,6 +2,7 @@
 
 import {
   fetchFinishEvents,
+  forceSubmitMatch,
   getCurrentMatchForCourt,
   getTabletContext,
   grabMatchForScoring,
@@ -11,10 +12,12 @@ import {
   listRefsForTabletWithRoles,
   recordFinishEvent,
   submitMatchResult,
+  undoLastFinishEvent,
   validateTabletSelection,
   verifyTabletPin,
   type CourtTabletContextResult,
   type FinishEventRow,
+  type ForceSubmitResult,
   type GrabMatchResult,
   type RecordFinishResult,
   type SubmitMatchResult,
@@ -24,6 +27,7 @@ import {
   type TabletRefWithRole,
   type TabletTournament,
   type TabletValidatedContext,
+  type UndoLastFinishResult,
 } from "@/lib/data/tablet";
 import {
   FINISH_TYPES,
@@ -267,6 +271,51 @@ export async function submitMatchResultAction(
     return {
       ok: false,
       reason: err instanceof Error ? err.message : "Failed to submit match",
+    };
+  }
+}
+
+export async function undoLastFinishEventAction(
+  matchId: string,
+  actorRefPlayerId: string
+): Promise<UndoLastFinishResult> {
+  try {
+    return await undoLastFinishEvent(matchId, actorRefPlayerId);
+  } catch (err) {
+    console.error("[undoLastFinishEventAction]", err);
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : "Failed to undo",
+    };
+  }
+}
+
+export async function forceSubmitMatchAction(
+  matchId: string,
+  winnerPlayerId: string,
+  actorRefPlayerId: string,
+  reason: string
+): Promise<ForceSubmitResult> {
+  try {
+    const trimmed = reason.trim();
+    if (!trimmed) {
+      return { ok: false, reason: "reason_required" };
+    }
+    if (!winnerPlayerId) {
+      return { ok: false, reason: "winner_required" };
+    }
+    return await forceSubmitMatch(
+      matchId,
+      winnerPlayerId,
+      actorRefPlayerId,
+      trimmed
+    );
+  } catch (err) {
+    console.error("[forceSubmitMatchAction]", err);
+    return {
+      ok: false,
+      reason:
+        err instanceof Error ? err.message : "Failed to force submit match",
     };
   }
 }

@@ -9,16 +9,27 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { ArrowLeftRight, Loader2, Trophy } from "lucide-react";
+import { ArrowLeftRight, Flag, Loader2, Trophy, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
   fetchFinishEventsAction,
+  forceSubmitMatchAction,
   grabMatchAction,
   recordFinishEventAction,
   submitMatchResultAction,
+  undoLastFinishEventAction,
 } from "@/app/tablet/actions";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import type { FinishEventRow, TabletMatchContext } from "@/lib/data/tablet";
 import {
   buildState,
@@ -29,6 +40,14 @@ import {
 } from "@/lib/scoring/build-state";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+
+const FORCE_REASON_CHIPS = [
+  "Walkover",
+  "Disqualification",
+  "Time limit",
+  "TO decision",
+  "Other",
+] as const;
 
 const ANGULAR_CLIP =
   "polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px))";
@@ -152,6 +171,14 @@ export function TabletScorer({
     stage: string | null;
   } | null>(null);
   const [sidesSwapped, setSidesSwapped] = useState(false);
+  const [undoing, setUndoing] = useState(false);
+  const [forceDialogOpen, setForceDialogOpen] = useState(false);
+  const [forceWinnerId, setForceWinnerId] = useState<string | null>(null);
+  const [forceReasonChip, setForceReasonChip] = useState<string | null>(null);
+  const [forceReasonOther, setForceReasonOther] = useState("");
+  const [forceSubmitting, setForceSubmitting] = useState(false);
+  const [forcedReason, setForcedReason] = useState<string | null>(null);
+  const [forcedWinnerId, setForcedWinnerId] = useState<string | null>(null);
 
   const [optimisticEvents, addOptimistic] = useOptimistic(
     events,
@@ -433,6 +460,131 @@ export function TabletScorer({
     });
   }
 
+  async function handleUndo() {
+    if (!p1 || !p2 || undoing) return;
+    if (matchStatus !== "in_progress") return;
+
+    const sorted = sortEvents(optimisticEvents);
+    const latest = sorted[sorted.length - 1];
+    if (!latest) {
+      toast.message("Nothing to undo");
+      return;
+    }
+
+    const scorer =
+      latest.scorer_player_id === p1.player_id ? p1 : p2;
+    const typeLabel = latest.finish_type;
+
+    // Optimistic remove — score rolls back via buildState replay.
+    const snapshot = events;
+    knownIdsRef.current.delete(latest.id);
+    setEvents((prev) => prev.filter((e) => e.id !== latest.id));
+    setUndoing(true);
+
+    const result = await undoLastFinishEventAction(
+      matchCtx.match.id,
+      refPlayerId
+    );
+    setUndoing(false);
+
+    if (!result.ok) {
+      setEvents(snapshot);
+      if (result.reason === "nothing_to_undo") {
+        toast.message("Nothing to undo");
+        return;
+      }
+      if (result.reason === "match_already_submitted") {
+        toast.error("Match already submitted — use Reopen instead");
+        return;
+      }
+      toast.error(
+        typeof result.reason === "string" ? result.reason : "Failed to undo"
+      );
+      return;
+    }
+
+    knownIdsRef.current.delete(result.deletedEvent.id);
+    setEvents((prev) =>
+      prev.filter((e) => e.id !== result.deletedEvent.id)
+    );
+    toast.success(`Undid ${scorer.display_name} ${typeLabel}`);
+  }
+
+  function openForceDialog() {
+    setForceWinnerId(null);
+    setForceReasonChip(null);
+    setForceReasonOther("");
+    setForceDialogOpen(true);
+  }
+
+  function forceReasonValue(): string {
+    if (!forceReasonChip) return "";
+    if (forceReasonChip === "Other") return forceReasonOther.trim();
+    if (forceReasonOther.trim()) {
+      return `${forceReasonChip}: ${forceReasonOther.trim()}`;
+    }
+    return forceReasonChip;
+  }
+
+  async function handleForceSubmit() {
+    if (!p1 || !p2 || !forceWinnerId || forceSubmitting) return;
+    const reason = forceReasonValue();
+    if (!reason) {
+      toast.error("Pick a reason for force submit");
+      return;
+    }
+
+    setForceSubmitting(true);
+    submitFiredRef.current = true;
+    const result = await forceSubmitMatchAction(
+      matchCtx.match.id,
+      forceWinnerId,
+      refPlayerId,
+      reason
+    );
+    setForceSubmitting(false);
+
+    if (!result.ok) {
+      submitFiredRef.current = false;
+      if (result.reason === "match_already_submitted") {
+        toast.error("Match already submitted");
+        return;
+      }
+      if (result.reason === "reason_required") {
+        toast.error("Reason is required");
+        return;
+      }
+      toast.error(
+        typeof result.reason === "string"
+          ? result.reason
+          : "Failed to force submit"
+      );
+      return;
+    }
+
+    setForceDialogOpen(false);
+    setForcedReason(result.forceReason);
+    setForcedWinnerId(forceWinnerId);
+    setMatchStatus("submitted");
+    setShowSummary(true);
+    onMatchUpdated({
+      ...matchCtx,
+      match: { ...matchCtx.match, status: "submitted" },
+    });
+    if (result.roundComplete && result.newMatchesAvailable) {
+      setSyncToHint({ stage: result.stage ?? null });
+    }
+    if (
+      result.challonge?.attempted &&
+      result.challonge.ok === false &&
+      result.challonge.error
+    ) {
+      toast.error(`Challonge report failed: ${result.challonge.error}`, {
+        duration: 8000,
+      });
+    }
+  }
+
   if (!p1 || !p2) {
     return (
       <p className="text-[13px] text-muted-foreground">
@@ -442,7 +594,8 @@ export function TabletScorer({
   }
 
   if (showSummary && state && totals) {
-    const winnerIsP1 = state.winnerId === p1.player_id;
+    const effectiveWinnerId = forcedWinnerId ?? state.winnerId;
+    const winnerIsP1 = effectiveWinnerId === p1.player_id;
     const winner = winnerIsP1 ? p1 : p2;
     const winnerColor = winnerIsP1 ? "var(--scorer-p1)" : "var(--scorer-p2)";
 
@@ -458,6 +611,23 @@ export function TabletScorer({
         <p className="mt-1 text-[12px] font-medium uppercase tracking-widest text-muted-foreground">
           Winner
         </p>
+        {forcedReason ? (
+          <div className="mt-3 flex flex-col items-center gap-1">
+            <span
+              className="inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-black uppercase tracking-widest"
+              style={{
+                background: "rgba(251,191,36,0.15)",
+                color: "#fbbf24",
+                border: "1px solid rgba(251,191,36,0.35)",
+              }}
+            >
+              Forced result
+            </span>
+            <p className="max-w-sm text-[12px] text-muted-foreground">
+              {forcedReason}
+            </p>
+          </div>
+        ) : null}
         <p className="mt-4 text-2xl font-semibold text-white">
           {state.setsWon1}–{state.setsWon2}
         </p>
@@ -602,6 +772,12 @@ export function TabletScorer({
   }
 
   const disabled = !state || state.matchComplete || matchStatus !== "in_progress";
+  const canUndo =
+    matchStatus === "in_progress" &&
+    !state?.matchComplete &&
+    optimisticEvents.length > 0 &&
+    !undoing;
+  const forceReasonReady = Boolean(forceReasonValue());
 
   return (
     <div className="flex w-full max-w-5xl flex-1 flex-col gap-4">
@@ -650,6 +826,41 @@ export function TabletScorer({
         />
       </div>
 
+      <div className="flex items-center justify-between gap-3 px-1">
+        <button
+          type="button"
+          disabled={!canUndo}
+          onClick={() => void handleUndo()}
+          className={cn(
+            "inline-flex min-h-11 items-center gap-2 rounded-xl px-4 py-2 text-[12px] font-black uppercase tracking-widest transition-colors",
+            canUndo
+              ? "bg-white/8 text-white hover:bg-white/12"
+              : "cursor-not-allowed text-muted-foreground/50"
+          )}
+          style={{
+            border: canUndo
+              ? "1px solid rgba(255,255,255,0.14)"
+              : "1px solid rgba(255,255,255,0.06)",
+          }}
+        >
+          {undoing ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Undo2 className="size-4" />
+          )}
+          Undo last
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={openForceDialog}
+          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground/70 transition-colors hover:bg-white/5 hover:text-muted-foreground disabled:opacity-40"
+        >
+          <Flag className="size-3.5" />
+          Force submit
+        </button>
+      </div>
+
       <div className="grid flex-1 grid-cols-2 gap-3">
         <FinishGrid
           accent={leftAccent}
@@ -664,6 +875,124 @@ export function TabletScorer({
           onPick={(id) => handleFinish(rightPlayer.player_id, id)}
         />
       </div>
+
+      <Dialog open={forceDialogOpen} onOpenChange={setForceDialogOpen}>
+        <DialogContent
+          className="max-w-md border-white/10 bg-[#12101a] text-white sm:max-w-md"
+          showCloseButton
+        >
+          <DialogHeader>
+            <DialogTitle className="text-white">Force submit match</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              End this match and declare a winner manually. Use this for
+              walkovers, disqualifications, or TO decisions.
+            </DialogDescription>
+          </DialogHeader>
+
+          <p className="text-[12px] text-muted-foreground">
+            Current:{" "}
+            <span style={{ color: "var(--scorer-p1)" }}>
+              {p1.display_name}
+            </span>{" "}
+            {state?.score1 ?? 0} – {state?.score2 ?? 0}{" "}
+            <span style={{ color: "var(--scorer-p2)" }}>
+              {p2.display_name}
+            </span>
+            <span className="ml-1 text-white/50">
+              (sets {state?.setsWon1 ?? 0}–{state?.setsWon2 ?? 0})
+            </span>
+          </p>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setForceWinnerId(p1.player_id)}
+              className={cn(
+                "min-h-14 rounded-xl px-3 py-3 text-[13px] font-semibold transition-colors",
+                forceWinnerId === p1.player_id
+                  ? "bg-[rgba(167,139,250,0.25)] ring-2 ring-[#a78bfa]"
+                  : "bg-[rgba(167,139,250,0.08)] hover:bg-[rgba(167,139,250,0.15)]"
+              )}
+              style={{ color: "var(--scorer-p1)" }}
+            >
+              {p1.display_name}
+            </button>
+            <button
+              type="button"
+              onClick={() => setForceWinnerId(p2.player_id)}
+              className={cn(
+                "min-h-14 rounded-xl px-3 py-3 text-[13px] font-semibold transition-colors",
+                forceWinnerId === p2.player_id
+                  ? "bg-[rgba(34,211,238,0.25)] ring-2 ring-[#22d3ee]"
+                  : "bg-[rgba(34,211,238,0.08)] hover:bg-[rgba(34,211,238,0.15)]"
+              )}
+              style={{ color: "var(--scorer-p2)" }}
+            >
+              {p2.display_name}
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+              Reason
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {FORCE_REASON_CHIPS.map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => setForceReasonChip(chip)}
+                  className={cn(
+                    "rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                    forceReasonChip === chip
+                      ? "bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/40"
+                      : "bg-white/5 text-muted-foreground hover:bg-white/10"
+                  )}
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+            {(forceReasonChip === "Other" || forceReasonChip) && (
+              <Input
+                value={forceReasonOther}
+                onChange={(e) => setForceReasonOther(e.target.value)}
+                placeholder={
+                  forceReasonChip === "Other"
+                    ? "Describe the reason…"
+                    : "Optional notes…"
+                }
+                className="border-white/10 bg-background text-sm font-bold"
+              />
+            )}
+          </div>
+
+          <DialogFooter className="border-white/10 bg-transparent">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setForceDialogOpen(false)}
+              disabled={forceSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                !forceWinnerId || !forceReasonReady || forceSubmitting
+              }
+              onClick={() => void handleForceSubmit()}
+              className="bg-amber-600 font-black uppercase tracking-widest text-xs text-white hover:bg-amber-500 disabled:opacity-40"
+            >
+              {forceSubmitting ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                "Force submit"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -59,6 +59,8 @@ export type MatchRow = {
   sets_won1: number | null;
   sets_won2: number | null;
   court_number: number | null;
+  force_submitted: boolean;
+  force_submit_reason: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -96,6 +98,8 @@ export type MatchWithContext = {
     winner_id: string | null;
     challonge_reported_at: string | null;
     challonge_report_error: string | null;
+    force_submitted: boolean;
+    force_submit_reason: string | null;
     updated_at: string | null;
     created_at: string | null;
   };
@@ -161,6 +165,9 @@ function mapMatchRow(row: Record<string, unknown>): MatchRow {
     sets_won2: typeof row.sets_won2 === "number" ? row.sets_won2 : null,
     court_number:
       typeof row.court_number === "number" ? row.court_number : null,
+    force_submitted: Boolean(row.force_submitted),
+    force_submit_reason:
+      (row.force_submit_reason as string | null) ?? null,
     created_at: (row.created_at as string | null) ?? null,
     updated_at: (row.updated_at as string | null) ?? null,
   };
@@ -432,6 +439,8 @@ export async function listMatchesWithContext(
         winner_id: match.winner_id,
         challonge_reported_at: match.challonge_reported_at,
         challonge_report_error: match.challonge_report_error,
+        force_submitted: match.force_submitted,
+        force_submit_reason: match.force_submit_reason,
         updated_at: match.updated_at,
         created_at: match.created_at,
       },
@@ -1149,6 +1158,7 @@ export async function reportSubmittedMatchToChallonge(
       point_cap,
       sets_to_win,
       challonge_reported_at,
+      force_submitted,
       tournaments!matches_tournament_id_fkey(id, challonge_id)
     `
     )
@@ -1166,6 +1176,8 @@ export async function reportSubmittedMatchToChallonge(
   if (!match) {
     return { attempted: true, ok: false, error: "Match not found" };
   }
+
+  const forceSubmitted = Boolean(match.force_submitted);
 
   const tournamentRaw = match.tournaments as
     | { id?: string; challonge_id?: string | null }
@@ -1304,8 +1316,21 @@ export async function reportSubmittedMatchToChallonge(
     setsToWin,
     p2Id
   );
-  if (!finalState.matchComplete || !finalState.winnerId) {
+  // Force-submitted matches may not reach normal win conditions — still report
+  // using matches.winner_id and whatever set scores exist (or a walkover 1-0).
+  if (
+    !forceSubmitted &&
+    (!finalState.matchComplete || !finalState.winnerId)
+  ) {
     const msg = "Match not complete — cannot report to Challonge";
+    await admin
+      .from("matches")
+      .update({ challonge_report_error: msg })
+      .eq("id", matchId);
+    return { attempted: true, ok: false, error: msg };
+  }
+  if (forceSubmitted && !winnerPlayerId) {
+    const msg = "Forced match has no winner_id";
     await admin
       .from("matches")
       .update({ challonge_report_error: msg })
@@ -1319,17 +1344,26 @@ export async function reportSubmittedMatchToChallonge(
     pointCap,
     setsToWin
   );
-  const perSetScores = totals.setBreakdown
+  let perSetScores = totals.setBreakdown
     .filter((row) => row.winner != null)
     .map((row) => ({ p1: row.p1, p2: row.p2 }));
 
   if (perSetScores.length === 0) {
-    const msg = "No completed sets to report";
-    await admin
-      .from("matches")
-      .update({ challonge_report_error: msg })
-      .eq("id", matchId);
-    return { attempted: true, ok: false, error: msg };
+    if (forceSubmitted && winnerPlayerId) {
+      perSetScores = [
+        {
+          p1: winnerPlayerId === p1Id ? 1 : 0,
+          p2: winnerPlayerId === p2Id ? 1 : 0,
+        },
+      ];
+    } else {
+      const msg = "No completed sets to report";
+      await admin
+        .from("matches")
+        .update({ challonge_report_error: msg })
+        .eq("id", matchId);
+      return { attempted: true, ok: false, error: msg };
+    }
   }
 
   const scoresDisplay = formatScoresForChallonge(perSetScores);

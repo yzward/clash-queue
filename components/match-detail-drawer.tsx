@@ -227,7 +227,7 @@ export function MatchDetailDrawer({
               <SheetTitle className="text-lg text-white">
                 {p1?.display_name ?? "TBD"} vs {p2?.display_name ?? "TBD"}
               </SheetTitle>
-              <SheetDescription className="flex items-center gap-2 text-[12px]">
+              <SheetDescription className="flex flex-wrap items-center gap-2 text-[12px]">
                 <span>{formatRoundLabel(match.match)}</span>
                 <span
                   className="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -246,6 +246,18 @@ export function MatchDetailDrawer({
                 >
                   {statusLabel(match.match.status, match.match.winner_id)}
                 </span>
+                {match.match.force_submitted ? (
+                  <span
+                    className="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                    style={{
+                      background: "rgba(251,191,36,0.15)",
+                      color: "#fbbf24",
+                      border: "1px solid rgba(251,191,36,0.35)",
+                    }}
+                  >
+                    Forced result
+                  </span>
+                ) : null}
               </SheetDescription>
             </SheetHeader>
 
@@ -337,6 +349,13 @@ export function MatchDetailDrawer({
                       {winnerName}
                     </span>
                   </div>
+                ) : null}
+                {match.match.force_submitted &&
+                match.match.force_submit_reason ? (
+                  <MetaRow
+                    label="Force reason"
+                    value={match.match.force_submit_reason}
+                  />
                 ) : null}
               </div>
 

@@ -671,8 +671,38 @@ export type SubmitMatchResult =
       roundComplete?: boolean;
       newMatchesAvailable?: boolean;
       stage?: string | null;
+      forceSubmitted?: boolean;
+      forceReason?: string | null;
     }
   | { ok: false; reason: "not_complete" | "not_found" | string };
+
+export type UndoLastFinishResult =
+  | { ok: true; deletedEvent: FinishEventRow }
+  | {
+      ok: false;
+      reason:
+        | "nothing_to_undo"
+        | "match_already_submitted"
+        | "not_found"
+        | string;
+    };
+
+export type ForceSubmitResult =
+  | {
+      ok: true;
+      finalState: MatchScoreState;
+      forceReason: string;
+      challonge?: {
+        attempted: boolean;
+        ok: boolean;
+        error?: string;
+        scores?: string;
+      };
+      roundComplete?: boolean;
+      newMatchesAvailable?: boolean;
+      stage?: string | null;
+    }
+  | { ok: false; reason: string };
 
 export async function grabMatchForScoring(
   matchId: string,
@@ -904,6 +934,283 @@ export async function recordFinishEvent(
         typeof inserted.set_number === "number" ? inserted.set_number : 1,
       created_at: (inserted.created_at as string | null) ?? null,
     },
+  };
+}
+
+/**
+ * Remove the most recent finish event and recompute live scores.
+ * Scoring only — blocked once the match is submitted.
+ */
+export async function undoLastFinishEvent(
+  matchId: string,
+  actorRefPlayerId: string
+): Promise<UndoLastFinishResult> {
+  const admin = createAdminClient();
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select("id, status, point_cap, sets_to_win, ref_id")
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[tablet:undo] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+
+  const status = String(match.status ?? "");
+  if (status === "submitted") {
+    return { ok: false, reason: "match_already_submitted" };
+  }
+  if (status !== "in_progress" && status !== "grabbed") {
+    return { ok: false, reason: "match_not_in_progress" };
+  }
+
+  // Best-effort ref context log (tablet is unauthenticated).
+  if (
+    match.ref_id &&
+    actorRefPlayerId &&
+    String(match.ref_id) !== actorRefPlayerId
+  ) {
+    console.warn(
+      `[tablet:undo] actor ${actorRefPlayerId} differs from match.ref_id ${match.ref_id}`
+    );
+  }
+
+  const { data: latest, error: latestError } = await admin
+    .from("finish_events")
+    .select(
+      "id, match_id, scorer_player_id, finish_type, points, set_number, created_at"
+    )
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (latestError) {
+    console.error("[tablet:undo] latest", latestError);
+    throw new Error(`Failed to load finish events: ${latestError.message}`);
+  }
+  if (!latest) {
+    return { ok: false, reason: "nothing_to_undo" };
+  }
+
+  const deletedEvent: FinishEventRow = {
+    id: String(latest.id),
+    match_id: String(latest.match_id),
+    scorer_player_id: String(latest.scorer_player_id),
+    finish_type: String(latest.finish_type),
+    points: typeof latest.points === "number" ? latest.points : 0,
+    set_number: typeof latest.set_number === "number" ? latest.set_number : 1,
+    created_at: (latest.created_at as string | null) ?? null,
+  };
+
+  const { error: deleteError } = await admin
+    .from("finish_events")
+    .delete()
+    .eq("id", deletedEvent.id)
+    .eq("match_id", matchId);
+
+  if (deleteError) {
+    console.error("[tablet:undo] delete", deleteError);
+    return { ok: false, reason: `Failed to undo: ${deleteError.message}` };
+  }
+
+  const remaining = await fetchFinishEvents(matchId);
+  const { data: mps } = await admin
+    .from("match_players")
+    .select("player_id, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true });
+
+  const p1Id = String(mps?.[0]?.player_id ?? "");
+  const p2Id = mps?.[1] ? String(mps[1].player_id) : null;
+  const pointCap =
+    typeof match.point_cap === "number" && match.point_cap > 0
+      ? match.point_cap
+      : 5;
+  const setsToWin =
+    typeof match.sets_to_win === "number" && match.sets_to_win > 0
+      ? match.sets_to_win
+      : 2;
+
+  const next = p1Id
+    ? buildState(remaining, p1Id, pointCap, setsToWin, p2Id)
+    : null;
+
+  if (next) {
+    await admin
+      .from("matches")
+      .update({
+        score1: next.score1,
+        score2: next.score2,
+        sets_won1: next.setsWon1,
+        sets_won2: next.setsWon2,
+        current_set: next.currentSet,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", matchId);
+  }
+
+  return { ok: true, deletedEvent };
+}
+
+/**
+ * Manually end a match with a declared winner (walkover / DQ / TO decision).
+ * Preserves partial finish_events; reports to Challonge non-blocking.
+ */
+export async function forceSubmitMatch(
+  matchId: string,
+  winnerPlayerId: string,
+  actorRefPlayerId: string,
+  reason: string
+): Promise<ForceSubmitResult> {
+  const admin = createAdminClient();
+  const trimmedReason = reason.trim();
+  if (!trimmedReason) {
+    return { ok: false, reason: "reason_required" };
+  }
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select("id, status, court_id, point_cap, sets_to_win, ref_id")
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[tablet:forceSubmit] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+
+  const status = String(match.status ?? "");
+  if (status === "submitted") {
+    return { ok: false, reason: "match_already_submitted" };
+  }
+  if (status !== "in_progress" && status !== "pending" && status !== "grabbed") {
+    return { ok: false, reason: `invalid_status:${status || "unknown"}` };
+  }
+
+  if (
+    match.ref_id &&
+    actorRefPlayerId &&
+    String(match.ref_id) !== actorRefPlayerId
+  ) {
+    console.warn(
+      `[tablet:forceSubmit] actor ${actorRefPlayerId} differs from match.ref_id ${match.ref_id}`
+    );
+  }
+
+  const { data: mps, error: mpError } = await admin
+    .from("match_players")
+    .select("id, player_id, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true });
+
+  if (mpError || !mps || mps.length < 2) {
+    return { ok: false, reason: "bad_players" };
+  }
+
+  const p1 = mps[0];
+  const p2 = mps[1];
+  const p1Id = String(p1.player_id);
+  const p2Id = String(p2.player_id);
+  if (winnerPlayerId !== p1Id && winnerPlayerId !== p2Id) {
+    return { ok: false, reason: "winner_not_in_match" };
+  }
+
+  const pointCap =
+    typeof match.point_cap === "number" && match.point_cap > 0
+      ? match.point_cap
+      : 5;
+  const setsToWin =
+    typeof match.sets_to_win === "number" && match.sets_to_win > 0
+      ? match.sets_to_win
+      : 2;
+
+  const events = await fetchFinishEvents(matchId);
+  const currentState = buildState(events, p1Id, pointCap, setsToWin, p2Id);
+  const totals = computeEffectiveTotals(events, p1Id, pointCap, setsToWin);
+  const now = new Date().toISOString();
+
+  // Preserve partial progress as-is; only override completion + winner.
+  const finalState: MatchScoreState = {
+    ...currentState,
+    matchComplete: true,
+    winnerId: winnerPlayerId,
+  };
+
+  const { error: updateError } = await admin
+    .from("matches")
+    .update({
+      status: "submitted",
+      winner_id: winnerPlayerId,
+      score1: finalState.score1,
+      score2: finalState.score2,
+      sets_won1: finalState.setsWon1,
+      sets_won2: finalState.setsWon2,
+      current_set: finalState.currentSet,
+      force_submitted: true,
+      force_submit_reason: trimmedReason,
+      updated_at: now,
+    })
+    .eq("id", matchId)
+    .neq("status", "submitted");
+
+  if (updateError) {
+    console.error("[tablet:forceSubmit] update", updateError);
+    throw new Error(`Failed to force submit: ${updateError.message}`);
+  }
+
+  await Promise.all([
+    admin
+      .from("match_players")
+      .update({
+        sets_won: finalState.setsWon1,
+        total_points: totals.p1Total,
+        winner: winnerPlayerId === p1Id,
+      })
+      .eq("id", p1.id),
+    admin
+      .from("match_players")
+      .update({
+        sets_won: finalState.setsWon2,
+        total_points: totals.p2Total,
+        winner: winnerPlayerId === p2Id,
+      })
+      .eq("id", p2.id),
+  ]);
+
+  const courtId = (match.court_id as string | null) ?? null;
+  if (courtId) {
+    await admin
+      .from("courts")
+      .update({ current_match_id: null })
+      .eq("id", courtId)
+      .eq("current_match_id", matchId);
+  } else {
+    await admin
+      .from("courts")
+      .update({ current_match_id: null })
+      .eq("current_match_id", matchId);
+  }
+
+  const challonge = await runChallongeReportPhase(matchId);
+  const syncHint =
+    challonge.attempted && challonge.ok
+      ? await getRoundSyncHintAfterReport(matchId)
+      : null;
+
+  return {
+    ok: true,
+    finalState,
+    forceReason: trimmedReason,
+    challonge,
+    roundComplete: syncHint?.roundComplete ?? false,
+    newMatchesAvailable: syncHint?.newMatchesAvailable ?? false,
+    stage: syncHint?.stage ?? null,
   };
 }
 
