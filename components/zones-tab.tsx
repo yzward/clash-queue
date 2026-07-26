@@ -1,6 +1,11 @@
 "use client";
 
-import { MoreHorizontal, Plus } from "lucide-react";
+import {
+  Copy,
+  ExternalLink,
+  MoreHorizontal,
+  Plus,
+} from "lucide-react";
 import {
   useEffect,
   useOptimistic,
@@ -34,6 +39,8 @@ import {
 import { Input } from "@/components/ui/input";
 import type { Court } from "@/lib/data/courts";
 
+const FALLBACK_ORIGIN = "https://queue.clash.co.nz";
+
 type OptimisticUpdate =
   | { type: "add"; court: Court }
   | { type: "rename"; courtId: string; name: string }
@@ -59,14 +66,54 @@ function applyOptimisticUpdate(
   }
 }
 
-function CourtRow({
+function displayHostPath(origin: string, courtId: string): string {
+  try {
+    const host = new URL(origin).host;
+    return `${host}/tablet/${courtId}`;
+  } catch {
+    return `queue.clash.co.nz/tablet/${courtId}`;
+  }
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+
+  try {
+    const input = document.createElement("input");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    input.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(input);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function ZoneCourtCard({
   court,
   tournamentId,
+  origin,
+  matchup,
   onOptimistic,
   onRequestDelete,
 }: {
   court: Court;
   tournamentId: string;
+  origin: string;
+  matchup: string | null;
   onOptimistic: (update: OptimisticUpdate) => void;
   onRequestDelete: (court: Court) => void;
 }) {
@@ -126,78 +173,157 @@ function CourtRow({
   };
 
   const inUse = court.current_match_id != null;
+  const isTempId = court.id.startsWith("temp-");
+  const fullUrl = `${origin}/tablet/${court.id}`;
+  const displayUrl = displayHostPath(origin, court.id);
 
   return (
     <div
-      className="flex items-center gap-3 rounded-[10px] px-3 py-3"
+      className="rounded-[10px] p-3.5"
       style={{
         background: "rgba(255,255,255,0.03)",
         border: "1px solid rgba(255,255,255,0.06)",
       }}
     >
-      <div className="min-w-0 flex-1">
-        {editing ? (
-          <Input
-            ref={inputRef}
-            value={draftName}
-            onChange={(event) => setDraftName(event.target.value)}
-            onBlur={commitRename}
-            onKeyDown={handleKeyDown}
-            disabled={pending}
-            className="h-8 text-[13px] text-white"
-            aria-label="Court name"
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={startRename}
-            className="block w-full truncate text-left text-[13px] font-medium text-white hover:text-white/90"
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <Input
+              ref={inputRef}
+              value={draftName}
+              onChange={(event) => setDraftName(event.target.value)}
+              onBlur={commitRename}
+              onKeyDown={handleKeyDown}
+              disabled={pending}
+              className="h-8 text-[14px] text-white"
+              aria-label="Court name"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={startRename}
+              className="block w-full truncate text-left text-[14px] font-medium text-white hover:text-white/90"
+            >
+              {court.name}
+            </button>
+          )}
+        </div>
+
+        <div className="flex min-w-0 shrink-0 flex-col items-end gap-0.5">
+          <span
+            className="text-xs font-medium"
+            style={{ color: inUse ? "#fbbf24" : "rgba(255,255,255,0.4)" }}
           >
-            {court.name}
-          </button>
-        )}
+            {inUse ? "In use" : "Free"}
+          </span>
+          {inUse && matchup ? (
+            <span className="max-w-[160px] truncate text-[10px] text-muted-foreground">
+              {matchup}
+            </span>
+          ) : null}
+        </div>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground hover:text-white"
+              aria-label={`Court options for ${court.name}`}
+            >
+              <MoreHorizontal className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={startRename}>Rename</DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => onRequestDelete(court)}
+            >
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
-      <span
-        className="shrink-0 text-xs font-medium"
-        style={{ color: inUse ? "#fbbf24" : "rgba(255,255,255,0.4)" }}
+      <div
+        className="mt-3 pt-3"
+        style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
       >
-        {inUse ? "In use" : "Free"}
-      </span>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
+        <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          Tablet URL
+        </p>
+        <div className="mt-1.5 flex items-center gap-2">
+          <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+            {isTempId ? "Generating…" : displayUrl}
+          </p>
           <Button
             type="button"
             variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground hover:text-white"
-            aria-label={`Court options for ${court.name}`}
+            size="sm"
+            disabled={isTempId}
+            className="shrink-0 gap-1 text-muted-foreground hover:text-white"
+            onClick={async () => {
+              const ok = await copyText(fullUrl);
+              if (ok) {
+                toast.success(`Copied ${court.name} tablet URL`);
+              } else {
+                toast.error("Copy this URL manually", {
+                  description: fullUrl,
+                });
+              }
+            }}
           >
-            <MoreHorizontal className="size-4" />
+            <Copy className="size-3.5" />
+            Copy
           </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={startRename}>Rename</DropdownMenuItem>
-          <DropdownMenuItem
-            variant="destructive"
-            onClick={() => onRequestDelete(court)}
-          >
-            Delete
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+          {isTempId ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              disabled
+              className="shrink-0 text-muted-foreground"
+              aria-label={`Open ${court.name} tablet URL`}
+            >
+              <ExternalLink className="size-3.5" />
+            </Button>
+          ) : (
+            <Button
+              asChild
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 text-muted-foreground hover:text-white"
+            >
+              <a
+                href={fullUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`Open ${court.name} tablet URL`}
+              >
+                <ExternalLink className="size-3.5" />
+              </a>
+            </Button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-export function CourtsTab({
+export function ZonesTab({
   initialCourts,
   tournamentId,
+  occupancyLabels = {},
 }: {
   initialCourts: Court[];
   tournamentId: string;
+  /** courtId → matchup label when occupied */
+  occupancyLabels?: Record<string, string | null | undefined>;
 }) {
+  const [origin, setOrigin] = useState(FALLBACK_ORIGIN);
   const [addOpen, setAddOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Court | null>(null);
@@ -207,6 +333,12 @@ export function CourtsTab({
     initialCourts,
     applyOptimisticUpdate
   );
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.location.origin) {
+      setOrigin(window.location.origin);
+    }
+  }, []);
 
   const defaultName = `Court ${optimisticCourts.length + 1}`;
 
@@ -257,13 +389,18 @@ export function CourtsTab({
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-white">Courts</h2>
+          <h2 className="text-sm font-medium text-white">Zones</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {optimisticCourts.length} configured
+            {optimisticCourts.length} court
+            {optimisticCourts.length === 1 ? "" : "s"} configured
           </p>
         </div>
         {optimisticCourts.length > 0 ? (
-          <Button type="button" onClick={openAdd} className="gap-1.5">
+          <Button
+            type="button"
+            onClick={openAdd}
+            className="gap-1.5 bg-[#a78bfa] text-[#0a0a12] hover:bg-[#b79afc]"
+          >
             <Plus className="size-3.5" />
             Add court
           </Button>
@@ -279,9 +416,14 @@ export function CourtsTab({
           }}
         >
           <p className="max-w-sm text-sm text-muted-foreground">
-            No courts yet - add one to enable tablet scoring
+            No courts yet — add one to enable scoring and generate its tablet
+            URL.
           </p>
-          <Button type="button" onClick={openAdd} className="gap-1.5">
+          <Button
+            type="button"
+            onClick={openAdd}
+            className="gap-1.5 bg-[#a78bfa] text-[#0a0a12] hover:bg-[#b79afc]"
+          >
             <Plus className="size-3.5" />
             Add court
           </Button>
@@ -289,10 +431,12 @@ export function CourtsTab({
       ) : (
         <div className="flex flex-col gap-2">
           {optimisticCourts.map((court) => (
-            <CourtRow
+            <ZoneCourtCard
               key={court.id}
               court={court}
               tournamentId={tournamentId}
+              origin={origin}
+              matchup={occupancyLabels[court.id] ?? null}
               onOptimistic={applyOptimistic}
               onRequestDelete={(target) => {
                 setDeleteError(null);

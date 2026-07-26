@@ -393,7 +393,6 @@ export async function runPreflightChecks(
           fix_action: {
             label: "Configure courts",
             tab: "zones",
-            view: "courts",
           },
         })
   );
