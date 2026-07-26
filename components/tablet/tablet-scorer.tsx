@@ -212,9 +212,15 @@ export function TabletScorer({
   });
 
   useEffect(() => {
-    setMatchStatus(String(matchCtx.match.status ?? "pending"));
-    if (String(matchCtx.match.status) === "submitted") {
+    const status = String(matchCtx.match.status ?? "pending");
+    setMatchStatus(status);
+    if (status === "submitted") {
       setShowSummary(true);
+    } else if (status === "in_progress" || status === "grabbed") {
+      setShowSummary(false);
+      setForcedReason(null);
+      setForcedWinnerId(null);
+      submitFiredRef.current = false;
     }
   }, [matchCtx.match.id, matchCtx.match.status]);
 
@@ -325,6 +331,11 @@ export function TabletScorer({
           setMatchStatus(status);
           if (status === "submitted") {
             setShowSummary(true);
+          } else if (status === "in_progress" || status === "grabbed") {
+            setShowSummary(false);
+            setForcedReason(null);
+            setForcedWinnerId(null);
+            submitFiredRef.current = false;
           }
           const prev = matchCtxRef.current;
           onMatchUpdatedRef.current({

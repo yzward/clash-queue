@@ -49,9 +49,11 @@ import {
   generateMatchesFromChallonge,
   getCourtStatuses,
   listMatchesWithContext,
+  reopenMatch,
   retryChallongeReport,
   reassignCourt,
   startAndGenerateMatches,
+  swapMatchPlayers,
   switchMatchCourt,
   unassignCourt,
   unassignRef,
@@ -60,7 +62,9 @@ import {
   type CourtWithStatus,
   type GenerateMatchesResult,
   type MatchWithContext,
+  type ReopenMatchResult,
   type StartAndGenerateResult,
+  type SwapMatchPlayersResult,
 } from "@/lib/data/matches";
 import {
   clearTournamentChallongeReferences,
@@ -1255,6 +1259,82 @@ export async function retryChallongeReportAction(
       ok: false,
       error:
         err instanceof Error ? err.message : "Failed to retry Challonge report",
+    };
+  }
+}
+
+export type ReopenMatchActionResult =
+  | Extract<ReopenMatchResult, { ok: true }>
+  | { ok: false; error: string };
+
+export async function reopenMatchAction(
+  matchId: string,
+  tournamentId: string,
+  reason: string
+): Promise<ReopenMatchActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  const trimmed = reason.trim();
+  if (!trimmed) {
+    return { ok: false, error: "Reason is required" };
+  }
+
+  try {
+    const result = await reopenMatch(matchId, auth.playerId, trimmed);
+    if (!result.ok) {
+      const msg =
+        result.reason === "not_submitted"
+          ? "Match is not submitted"
+          : result.reason === "reason_required"
+            ? "Reason is required"
+            : result.reason;
+      return { ok: false, error: msg };
+    }
+    revalidatePath(`/t/${tournamentId}`);
+    return result;
+  } catch (err) {
+    console.error("[reopenMatchAction]", err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Failed to reopen match",
+    };
+  }
+}
+
+export type SwapMatchPlayersActionResult =
+  | Extract<SwapMatchPlayersResult, { ok: true }>
+  | { ok: false; error: string };
+
+export async function swapMatchPlayersAction(
+  matchId: string,
+  tournamentId: string
+): Promise<SwapMatchPlayersActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const result = await swapMatchPlayers(matchId, auth.playerId);
+    if (!result.ok) {
+      const msg =
+        result.reason === "not_submitted"
+          ? "Match is not submitted"
+          : result.reason === "bad_players"
+            ? "Match needs two players"
+            : result.reason;
+      return { ok: false, error: msg };
+    }
+    revalidatePath(`/t/${tournamentId}`);
+    return result;
+  } catch (err) {
+    console.error("[swapMatchPlayersAction]", err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Failed to swap players",
     };
   }
 }

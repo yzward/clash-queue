@@ -1,18 +1,28 @@
 "use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
-import { Loader2, Trophy } from "lucide-react";
+import { ArrowLeftRight, Loader2, RotateCcw, Trophy } from "lucide-react";
 import { toast } from "sonner";
 
 import {
   assignCourtAction,
   assignRefAction,
   listAvailableRefsAction,
+  reopenMatchAction,
   retryChallongeReportAction,
+  swapMatchPlayersAction,
   unassignCourtAction,
   unassignRefAction,
 } from "@/app/t/[id]/actions";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,6 +46,14 @@ import {
 } from "@/components/ui/tooltip";
 import type { MatchWithContext } from "@/lib/data/matches";
 import type { AvailableRef } from "@/lib/data/players";
+import { cn } from "@/lib/utils";
+
+const REOPEN_REASON_CHIPS = [
+  "Scoring error",
+  "Wrong result",
+  "Dispute",
+  "Other",
+] as const;
 
 function formatRoundLabel(match: MatchWithContext["match"]): string {
   if (match.round == null) {
@@ -102,6 +120,10 @@ export function MatchDetailDrawer({
   const [refQuery, setRefQuery] = useState("");
   const [refsLoaded, setRefsLoaded] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const [reopenOpen, setReopenOpen] = useState(false);
+  const [reopenChip, setReopenChip] = useState<string | null>(null);
+  const [reopenOther, setReopenOther] = useState("");
+  const [swapOpen, setSwapOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -138,12 +160,103 @@ export function MatchDetailDrawer({
   const isLive =
     match?.match.status === "in_progress" ||
     match?.match.status === "grabbed";
+  const isSubmitted = match?.match.status === "submitted";
   const startedLabel =
     isLive && match ? relativeTime(match.match.updated_at) : null;
 
   const assignableCourts = allCourts.filter(
     (c) => !c.occupied || c.occupiedByThis
   );
+
+  const courtOccupiedByOther = Boolean(
+    match?.court &&
+      allCourts.some(
+        (c) => c.id === match.court!.id && c.occupied && !c.occupiedByThis
+      )
+  );
+
+  const otherPlayerName = match?.match.winner_id
+    ? match.players.find((p) => p.player_id !== match.match.winner_id)
+        ?.display_name ?? null
+    : (match?.players[1]?.display_name ?? null);
+
+  function reopenReasonValue(): string {
+    if (!reopenChip) return "";
+    if (reopenChip === "Other") return reopenOther.trim();
+    if (reopenOther.trim()) return `${reopenChip}: ${reopenOther.trim()}`;
+    return reopenChip;
+  }
+
+  function openReopenDialog() {
+    setReopenChip(null);
+    setReopenOther("");
+    setReopenOpen(true);
+  }
+
+  function handleReopenConfirm() {
+    if (!match) return;
+    const reason = reopenReasonValue();
+    if (!reason) {
+      toast.error("Reason is required");
+      return;
+    }
+    startTransition(async () => {
+      const result = await reopenMatchAction(
+        match.match.id,
+        tournamentId,
+        reason
+      );
+      if (!result.ok) {
+        toast.error(result.error);
+        onRefresh();
+        return;
+      }
+      onMatchUpdated(result.match);
+      setReopenOpen(false);
+      toast.success("Match reopened");
+      if (!result.challongeUnreported || result.challongeError) {
+        toast.warning(
+          result.challongeError ??
+            "Reopened locally but Challonge may be out of sync",
+          { duration: 8000 }
+        );
+      } else if (!result.courtReclaimed && match.court) {
+        toast.message(
+          `Court ${match.court.name} is in use — reassign a court for rescoring`
+        );
+      }
+      onRefresh();
+    });
+  }
+
+  function handleSwapConfirm() {
+    if (!match) return;
+    startTransition(async () => {
+      const result = await swapMatchPlayersAction(
+        match.match.id,
+        tournamentId
+      );
+      if (!result.ok) {
+        toast.error(result.error);
+        onRefresh();
+        return;
+      }
+      onMatchUpdated(result.match);
+      setSwapOpen(false);
+      const newWinner =
+        result.match.players.find((p) => p.player_id === result.newWinnerId)
+          ?.display_name ?? "winner";
+      toast.success(`Players swapped — ${newWinner} now recorded as winner`);
+      if (!result.challongeOk || result.challongeError) {
+        toast.warning(
+          result.challongeError ??
+            "Swapped locally but Challonge may be out of sync",
+          { duration: 8000 }
+        );
+      }
+      onRefresh();
+    });
+  }
 
   function handleAssignCourt(courtId: string, courtName: string) {
     if (!match) return;
@@ -355,6 +468,16 @@ export function MatchDetailDrawer({
                   <MetaRow
                     label="Force reason"
                     value={match.match.force_submit_reason}
+                  />
+                ) : null}
+                {match.match.reopened_count > 0 ? (
+                  <MetaRow
+                    label="Reopened"
+                    value={
+                      match.match.last_reopen_reason
+                        ? `${match.match.reopened_count}× — ${match.match.last_reopen_reason}`
+                        : `${match.match.reopened_count}×`
+                    }
                   />
                 ) : null}
               </div>
@@ -585,6 +708,31 @@ export function MatchDetailDrawer({
                   </Button>
                 ) : null}
 
+                {isSubmitted ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={isPending}
+                      className="border border-amber-400/30 text-amber-200 hover:bg-amber-400/10 hover:text-amber-100"
+                      onClick={openReopenDialog}
+                    >
+                      <RotateCcw className="size-3.5" />
+                      Reopen match
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={isPending}
+                      className="border border-white/15 text-muted-foreground hover:bg-white/5 hover:text-white"
+                      onClick={() => setSwapOpen(true)}
+                    >
+                      <ArrowLeftRight className="size-3.5" />
+                      Swap players
+                    </Button>
+                  </>
+                ) : null}
+
                 <Button
                   type="button"
                   variant="ghost"
@@ -595,6 +743,140 @@ export function MatchDetailDrawer({
                 </Button>
               </div>
             </SheetFooter>
+
+            <Dialog open={reopenOpen} onOpenChange={setReopenOpen}>
+              <DialogContent className="max-w-md border-white/10 bg-[#12101a] text-white sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle className="text-white">
+                    Reopen {matchupLabel(match)}?
+                  </DialogTitle>
+                  <DialogDescription className="text-muted-foreground">
+                    This will clear the recorded result and let the match be
+                    scored again. The original scores are kept for audit.
+                    Challonge will be updated to remove the result.
+                  </DialogDescription>
+                </DialogHeader>
+
+                {courtOccupiedByOther && match.court ? (
+                  <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-100">
+                    This match&apos;s court ({match.court.name}) is currently in
+                    use by another match. You&apos;ll need to reassign a court
+                    after reopening.
+                  </p>
+                ) : null}
+
+                <div className="space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                    Reason
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {REOPEN_REASON_CHIPS.map((chip) => (
+                      <button
+                        key={chip}
+                        type="button"
+                        onClick={() => setReopenChip(chip)}
+                        className={cn(
+                          "rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                          reopenChip === chip
+                            ? "bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/40"
+                            : "bg-white/5 text-muted-foreground hover:bg-white/10"
+                        )}
+                      >
+                        {chip}
+                      </button>
+                    ))}
+                  </div>
+                  {(reopenChip === "Other" || reopenChip) && (
+                    <Input
+                      value={reopenOther}
+                      onChange={(e) => setReopenOther(e.target.value)}
+                      placeholder={
+                        reopenChip === "Other"
+                          ? "Describe the reason…"
+                          : "Optional notes…"
+                      }
+                      className="border-white/10 bg-background text-sm font-bold"
+                    />
+                  )}
+                </div>
+
+                <DialogFooter className="border-white/10 bg-transparent">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={isPending}
+                    onClick={() => setReopenOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={isPending || !reopenReasonValue()}
+                    onClick={handleReopenConfirm}
+                    className="bg-amber-600 font-black uppercase tracking-widest text-xs text-white hover:bg-amber-500 disabled:opacity-40"
+                  >
+                    {isPending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      "Reopen match"
+                    )}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={swapOpen} onOpenChange={setSwapOpen}>
+              <DialogContent className="max-w-md border-white/10 bg-[#12101a] text-white sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle className="text-white">
+                    Swap players?
+                  </DialogTitle>
+                  <DialogDescription className="text-muted-foreground">
+                    If this match was scored with the players mixed up, this
+                    swaps all recorded events between{" "}
+                    {p1?.display_name ?? "P1"} and {p2?.display_name ?? "P2"},
+                    recalculates the winner, and updates Challonge. Use this
+                    when the scores are right but attributed to the wrong
+                    players.
+                  </DialogDescription>
+                </DialogHeader>
+
+                <p className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-white/90">
+                  Current winner:{" "}
+                  <span className="font-semibold text-white">
+                    {winnerName ?? "—"}
+                  </span>
+                  {" → "}
+                  After swap:{" "}
+                  <span className="font-semibold text-amber-200">
+                    {otherPlayerName ?? "—"}
+                  </span>
+                </p>
+
+                <DialogFooter className="border-white/10 bg-transparent">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={isPending}
+                    onClick={() => setSwapOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={isPending}
+                    onClick={handleSwapConfirm}
+                    className="bg-amber-600 font-black uppercase tracking-widest text-xs text-white hover:bg-amber-500 disabled:opacity-40"
+                  >
+                    {isPending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      "Swap players"
+                    )}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </TooltipProvider>
         ) : null}
       </SheetContent>

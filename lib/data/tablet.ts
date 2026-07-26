@@ -795,6 +795,7 @@ export async function fetchFinishEvents(
       "id, match_id, scorer_player_id, finish_type, points, set_number, created_at"
     )
     .eq("match_id", matchId)
+    .is("reopened_at", null)
     .order("created_at", { ascending: true })
     .order("id", { ascending: true });
 
@@ -984,6 +985,7 @@ export async function undoLastFinishEvent(
       "id, match_id, scorer_player_id, finish_type, points, set_number, created_at"
     )
     .eq("match_id", matchId)
+    .is("reopened_at", null)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(1)

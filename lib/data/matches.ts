@@ -31,6 +31,7 @@ import {
   formatScoresForChallonge,
   getChallongeMatches,
   getChallongeTournament,
+  reopenChallongeMatch,
   reportMatchResult,
   startTournament,
 } from "@/lib/challonge/client";
@@ -61,6 +62,8 @@ export type MatchRow = {
   court_number: number | null;
   force_submitted: boolean;
   force_submit_reason: string | null;
+  reopened_count: number;
+  last_reopen_reason: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -100,6 +103,8 @@ export type MatchWithContext = {
     challonge_report_error: string | null;
     force_submitted: boolean;
     force_submit_reason: string | null;
+    reopened_count: number;
+    last_reopen_reason: string | null;
     updated_at: string | null;
     created_at: string | null;
   };
@@ -168,6 +173,10 @@ function mapMatchRow(row: Record<string, unknown>): MatchRow {
     force_submitted: Boolean(row.force_submitted),
     force_submit_reason:
       (row.force_submit_reason as string | null) ?? null,
+    reopened_count:
+      typeof row.reopened_count === "number" ? row.reopened_count : 0,
+    last_reopen_reason:
+      (row.last_reopen_reason as string | null) ?? null,
     created_at: (row.created_at as string | null) ?? null,
     updated_at: (row.updated_at as string | null) ?? null,
   };
@@ -441,6 +450,8 @@ export async function listMatchesWithContext(
         challonge_report_error: match.challonge_report_error,
         force_submitted: match.force_submitted,
         force_submit_reason: match.force_submit_reason,
+        reopened_count: match.reopened_count,
+        last_reopen_reason: match.last_reopen_reason,
         updated_at: match.updated_at,
         created_at: match.created_at,
       },
@@ -1279,6 +1290,7 @@ export async function reportSubmittedMatchToChallonge(
     .from("finish_events")
     .select("id, scorer_player_id, finish_type, points, created_at")
     .eq("match_id", matchId)
+    .is("reopened_at", null)
     .order("created_at", { ascending: true })
     .order("id", { ascending: true });
 
@@ -1465,6 +1477,420 @@ export async function retryChallongeReport(
   }
 
   return reportSubmittedMatchToChallonge(matchId);
+}
+
+export type ReopenMatchResult =
+  | {
+      ok: true;
+      courtReclaimed: boolean;
+      challongeUnreported: boolean;
+      challongeError?: string;
+      match: MatchWithContext;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Unwind a submitted match for rescoring. Marks current finish_events historical
+ * via reopened_at, resets local result, and reopens on Challonge when linked.
+ */
+export async function reopenMatch(
+  matchId: string,
+  actorPlayerId: string,
+  reason: string
+): Promise<ReopenMatchResult> {
+  const admin = createAdminClient();
+  const trimmedReason = reason.trim();
+  if (!trimmedReason) {
+    return { ok: false, reason: "reason_required" };
+  }
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select(
+      `
+      id,
+      status,
+      tournament_id,
+      court_id,
+      challonge_match_id,
+      reopened_count,
+      tournaments!matches_tournament_id_fkey(id, challonge_id)
+    `
+    )
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[matches:reopen] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+  if (String(match.status) !== "submitted") {
+    return { ok: false, reason: "not_submitted" };
+  }
+
+  console.info(
+    `[matches:reopen] match=${matchId} actor=${actorPlayerId} reason=${trimmedReason}`
+  );
+
+  const now = new Date().toISOString();
+
+  const { error: histError } = await admin
+    .from("finish_events")
+    .update({ reopened_at: now })
+    .eq("match_id", matchId)
+    .is("reopened_at", null);
+
+  if (histError) {
+    console.error("[matches:reopen] mark historical", histError);
+    throw new Error(`Failed to archive finish events: ${histError.message}`);
+  }
+
+  const prevCount =
+    typeof match.reopened_count === "number" ? match.reopened_count : 0;
+
+  const { error: resetError } = await admin
+    .from("matches")
+    .update({
+      status: "in_progress",
+      winner_id: null,
+      score1: 0,
+      score2: 0,
+      sets_won1: 0,
+      sets_won2: 0,
+      current_set: 1,
+      force_submitted: false,
+      force_submit_reason: null,
+      challonge_reported_at: null,
+      challonge_report_error: null,
+      reopened_count: prevCount + 1,
+      last_reopen_reason: trimmedReason,
+      updated_at: now,
+    })
+    .eq("id", matchId)
+    .eq("status", "submitted");
+
+  if (resetError) {
+    console.error("[matches:reopen] reset match", resetError);
+    throw new Error(`Failed to reopen match: ${resetError.message}`);
+  }
+
+  const { error: mpError } = await admin
+    .from("match_players")
+    .update({
+      sets_won: 0,
+      total_points: 0,
+      winner: false,
+    })
+    .eq("match_id", matchId);
+
+  if (mpError) {
+    console.error("[matches:reopen] match_players", mpError);
+    throw new Error(`Failed to reset match players: ${mpError.message}`);
+  }
+
+  let courtReclaimed = false;
+  const courtId = (match.court_id as string | null) ?? null;
+  if (courtId) {
+    const { data: court, error: courtError } = await admin
+      .from("courts")
+      .select("id, current_match_id")
+      .eq("id", courtId)
+      .maybeSingle();
+
+    if (courtError) {
+      console.error("[matches:reopen] court", courtError);
+    } else if (court) {
+      if (String(court.current_match_id ?? "") === matchId) {
+        courtReclaimed = true;
+      } else if (court.current_match_id == null) {
+        const { data: claimed, error: reclaimError } = await admin
+          .from("courts")
+          .update({ current_match_id: matchId })
+          .eq("id", courtId)
+          .is("current_match_id", null)
+          .select("current_match_id")
+          .maybeSingle();
+        if (reclaimError) {
+          console.error("[matches:reopen] reclaim", reclaimError);
+        } else {
+          courtReclaimed =
+            claimed != null && String(claimed.current_match_id) === matchId;
+        }
+      }
+      // Else: court occupied by another match — leave court_id, TO reassigns.
+    }
+  }
+
+  let challongeUnreported = false;
+  let challongeError: string | undefined;
+  const tournamentRaw = match.tournaments as
+    | { id?: string; challonge_id?: string | null }
+    | { id?: string; challonge_id?: string | null }[]
+    | null;
+  const tournament = Array.isArray(tournamentRaw)
+    ? tournamentRaw[0]
+    : tournamentRaw;
+  const challongeId = tournament?.challonge_id
+    ? String(tournament.challonge_id)
+    : null;
+  const challongeMatchId = match.challonge_match_id
+    ? String(match.challonge_match_id)
+    : null;
+
+  if (challongeId && challongeMatchId) {
+    try {
+      await reopenChallongeMatch(challongeId, challongeMatchId);
+      challongeUnreported = true;
+    } catch (err) {
+      challongeError = challongeErrorMessage(err);
+      console.error("[matches:reopen] challonge", err);
+      await admin
+        .from("matches")
+        .update({
+          challonge_report_error: `Reopened locally but Challonge unreport failed: ${challongeError}`,
+        })
+        .eq("id", matchId);
+    }
+  } else {
+    // Not linked — local reopen is enough.
+    challongeUnreported = true;
+  }
+
+  const tournamentId = String(match.tournament_id);
+  const rows = await listMatchesWithContext(tournamentId);
+  const updated = rows.find((r) => r.match.id === matchId);
+  if (!updated) {
+    return { ok: false, reason: "not_found_after_reopen" };
+  }
+
+  return {
+    ok: true,
+    courtReclaimed,
+    challongeUnreported,
+    challongeError,
+    match: updated,
+  };
+}
+
+export type SwapMatchPlayersResult =
+  | {
+      ok: true;
+      newWinnerId: string;
+      challongeOk: boolean;
+      challongeError?: string;
+      match: MatchWithContext;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Swap P1/P2 attribution on current finish_events for a submitted match,
+ * recompute winner, and re-report to Challonge (reopen → report if needed).
+ */
+export async function swapMatchPlayers(
+  matchId: string,
+  actorPlayerId: string
+): Promise<SwapMatchPlayersResult> {
+  const admin = createAdminClient();
+
+  const { data: match, error: matchError } = await admin
+    .from("matches")
+    .select(
+      `
+      id,
+      status,
+      tournament_id,
+      winner_id,
+      point_cap,
+      sets_to_win,
+      challonge_match_id,
+      tournaments!matches_tournament_id_fkey(id, challonge_id)
+    `
+    )
+    .eq("id", matchId)
+    .maybeSingle();
+
+  if (matchError) {
+    console.error("[matches:swapPlayers] match", matchError);
+    throw new Error(`Failed to load match: ${matchError.message}`);
+  }
+  if (!match) return { ok: false, reason: "not_found" };
+  if (String(match.status) !== "submitted") {
+    return { ok: false, reason: "not_submitted" };
+  }
+
+  console.info(
+    `[matches:swapPlayers] match=${matchId} actor=${actorPlayerId}`
+  );
+
+  const { data: mps, error: mpError } = await admin
+    .from("match_players")
+    .select("id, player_id, created_at")
+    .eq("match_id", matchId)
+    .order("created_at", { ascending: true });
+
+  if (mpError || !mps || mps.length < 2) {
+    return { ok: false, reason: "bad_players" };
+  }
+
+  const p1 = mps[0]!;
+  const p2 = mps[1]!;
+  const p1Id = String(p1.player_id);
+  const p2Id = String(p2.player_id);
+
+  const { error: swapError } = await admin.rpc("swap_finish_event_scorers", {
+    p_match_id: matchId,
+    p_player_a: p1Id,
+    p_player_b: p2Id,
+  });
+
+  if (swapError) {
+    console.error("[matches:swapPlayers] rpc", swapError);
+    throw new Error(`Failed to swap finish events: ${swapError.message}`);
+  }
+
+  const pointCap =
+    typeof match.point_cap === "number" && match.point_cap > 0
+      ? match.point_cap
+      : 5;
+  const setsToWin =
+    typeof match.sets_to_win === "number" && match.sets_to_win > 0
+      ? match.sets_to_win
+      : 2;
+
+  const { data: events, error: eventsError } = await admin
+    .from("finish_events")
+    .select("id, scorer_player_id, finish_type, points, created_at")
+    .eq("match_id", matchId)
+    .is("reopened_at", null)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (eventsError) {
+    console.error("[matches:swapPlayers] events", eventsError);
+    throw new Error(`Failed to load finish events: ${eventsError.message}`);
+  }
+
+  const scoreEvents = (events ?? []).map((e) => ({
+    id: String(e.id),
+    scorer_player_id: String(e.scorer_player_id),
+    finish_type: String(e.finish_type),
+    points: typeof e.points === "number" ? e.points : 0,
+    created_at: (e.created_at as string | null) ?? null,
+  }));
+
+  const state = buildState(scoreEvents, p1Id, pointCap, setsToWin, p2Id);
+  const totals = computeEffectiveTotals(
+    scoreEvents,
+    p1Id,
+    pointCap,
+    setsToWin
+  );
+
+  // After swap, winner should flip if there was a decisive result.
+  const newWinnerId =
+    state.winnerId ??
+    (match.winner_id === p1Id
+      ? p2Id
+      : match.winner_id === p2Id
+        ? p1Id
+        : null);
+
+  if (!newWinnerId) {
+    return { ok: false, reason: "no_winner_after_swap" };
+  }
+
+  const now = new Date().toISOString();
+  const { error: updateMatchError } = await admin
+    .from("matches")
+    .update({
+      winner_id: newWinnerId,
+      score1: state.score1,
+      score2: state.score2,
+      sets_won1: state.setsWon1,
+      sets_won2: state.setsWon2,
+      current_set: state.currentSet,
+      updated_at: now,
+    })
+    .eq("id", matchId);
+
+  if (updateMatchError) {
+    console.error("[matches:swapPlayers] update match", updateMatchError);
+    throw new Error(`Failed to update match: ${updateMatchError.message}`);
+  }
+
+  await Promise.all([
+    admin
+      .from("match_players")
+      .update({
+        sets_won: state.setsWon1,
+        total_points: totals.p1Total,
+        winner: newWinnerId === p1Id,
+      })
+      .eq("id", p1.id),
+    admin
+      .from("match_players")
+      .update({
+        sets_won: state.setsWon2,
+        total_points: totals.p2Total,
+        winner: newWinnerId === p2Id,
+      })
+      .eq("id", p2.id),
+  ]);
+
+  let challongeOk = false;
+  let challongeError: string | undefined;
+  const tournamentRaw = match.tournaments as
+    | { id?: string; challonge_id?: string | null }
+    | { id?: string; challonge_id?: string | null }[]
+    | null;
+  const tournament = Array.isArray(tournamentRaw)
+    ? tournamentRaw[0]
+    : tournamentRaw;
+  const challongeId = tournament?.challonge_id
+    ? String(tournament.challonge_id)
+    : null;
+  const challongeMatchId = match.challonge_match_id
+    ? String(match.challonge_match_id)
+    : null;
+
+  if (challongeId && challongeMatchId) {
+    try {
+      // Reopen first so reportMatchResult can write a corrected winner.
+      await reopenChallongeMatch(challongeId, challongeMatchId);
+      const report = await reportSubmittedMatchToChallonge(matchId);
+      challongeOk = report.attempted ? report.ok : true;
+      if (report.attempted && !report.ok) {
+        challongeError = report.error;
+      }
+    } catch (err) {
+      challongeError = challongeErrorMessage(err);
+      console.error("[matches:swapPlayers] challonge", err);
+      await admin
+        .from("matches")
+        .update({
+          challonge_report_error: `Players swapped locally but Challonge update failed: ${challongeError}`,
+        })
+        .eq("id", matchId);
+    }
+  } else {
+    challongeOk = true;
+  }
+
+  const tournamentId = String(match.tournament_id);
+  const rows = await listMatchesWithContext(tournamentId);
+  const updated = rows.find((r) => r.match.id === matchId);
+  if (!updated) {
+    return { ok: false, reason: "not_found_after_swap" };
+  }
+
+  return {
+    ok: true,
+    newWinnerId,
+    challongeOk,
+    challongeError,
+    match: updated,
+  };
 }
 
 /**

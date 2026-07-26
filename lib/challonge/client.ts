@@ -802,6 +802,92 @@ export type ReportMatchResultInput = {
 };
 
 /**
+ * Reopen a completed Challonge match (clears result / returns to open).
+ *
+ * PUT /v2.1/tournaments/{id}/matches/{matchId}/change_state.json
+ * body: { data: { type: "MatchState", attributes: { state: "reopen" } } }
+ *
+ * Idempotent when match is already open/pending.
+ */
+export async function reopenChallongeMatch(
+  challongeId: string,
+  challongeMatchId: string
+): Promise<ChallongeMatch> {
+  const path = `/tournaments/${encodeURIComponent(challongeId)}/matches/${encodeURIComponent(challongeMatchId)}/change_state.json`;
+
+  let current: ChallongeMatch;
+  try {
+    current = await getChallongeMatch(challongeId, challongeMatchId);
+  } catch (err) {
+    if (err instanceof ChallongeMatchNotFoundError) throw err;
+    if (err instanceof ChallongeError) {
+      if (err.status === 401 || err.status === 403) {
+        throw new ChallongeAuthError("API key rejected", err.body);
+      }
+      if (err.status === 404) {
+        throw new ChallongeMatchNotFoundError(
+          "Match not found on Challonge — sync gap?",
+          err.body
+        );
+      }
+      if (err.status === 429) {
+        throw new ChallongeRateLimitError("Rate limit exceeded — retry", err.body);
+      }
+    }
+    throw err;
+  }
+
+  if (current.state === "open" || current.state === "pending") {
+    return current;
+  }
+
+  try {
+    const doc = await challongeRequest<JsonApiDocument>(path, {
+      method: "PUT",
+      body: JSON.stringify({
+        data: {
+          type: "MatchState",
+          attributes: { state: "reopen" },
+        },
+      }),
+    });
+
+    if (!doc.data || Array.isArray(doc.data)) {
+      return getChallongeMatch(challongeId, challongeMatchId);
+    }
+    return normaliseMatch(doc.data);
+  } catch (err) {
+    if (err instanceof ChallongeError) {
+      if (err.status === 401 || err.status === 403) {
+        throw new ChallongeAuthError("API key rejected", err.body);
+      }
+      if (err.status === 404) {
+        throw new ChallongeMatchNotFoundError(
+          "Match not found on Challonge — sync gap?",
+          err.body
+        );
+      }
+      if (err.status === 429) {
+        throw new ChallongeRateLimitError("Rate limit exceeded — retry", err.body);
+      }
+      if (err.status === 400 || err.status === 422) {
+        // Already open / not complete — treat as success if GET says open.
+        const latest = await getChallongeMatch(challongeId, challongeMatchId);
+        if (latest.state === "open" || latest.state === "pending") {
+          return latest;
+        }
+        throw new ChallongeMatchStateError(
+          extractMatchReportErrorMessage(err),
+          err.status,
+          err.body
+        );
+      }
+    }
+    throw err;
+  }
+}
+
+/**
  * Report a match result to Challonge v2.1.
  *
  * Confirmed live 2026-07-26 against Open Division Test (nl7udlbm / 18249513):
