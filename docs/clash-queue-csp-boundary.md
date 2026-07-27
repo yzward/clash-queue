@@ -126,10 +126,22 @@ _To be filled in by inspecting CSP. Candidates:_
 
 ### Requires a data-contract check before removal (do NOT remove blind)
 - Anything in CSP that writes `tournament_entrants` — CQ reads these.
-- Anything in CSP that reads `matches` / `match_players` / `finish_events` — this is the ranking pipeline; it must keep working after CQ becomes the writer.
+- CSP ranking has TWO pipelines. Pipeline B (stats/W-L/finishes/PPS via `refresh_player_stats`) reads `matches`/`match_players`/`finish_events` directly through DB triggers — Clash Queue already writes everything this needs, SAFE as-is. Pipeline A (CLP / `players.ranking_points` via `award_tournament_points` RPC) does NOT read match results — it reads `tournament_entrants.placement` + `points_scale`. Clash Queue does NOT write placements or call the RPC. This is the one real gap. See §5.1.
 - Anything touching the shared `tournaments` fields.
 
 **Removal rule:** before deleting any CSP surface, grep BOTH repos for reads/writes of the tables it touches. If Clash Queue reads a table CSP writes (or vice versa), that code is load-bearing across the boundary and cannot be removed without a migration plan.
+
+### 5.1 CLP gap — the one real separation blocker
+
+When a ranking tournament completes on Clash Queue, CLP (`players.ranking_points`) stays stale unless someone writes `tournament_entrants.placement` AND calls `award_tournament_points(t_id)`. CQ does neither today. Pipeline B stats update fine via triggers; only CLP is affected.
+
+Two ways to close it:
+- **(a) CQ owns completion** — a "Complete tournament" step derives final placements from Challonge standings, writes `tournament_entrants.placement`, calls `award_tournament_points`. Aligns with "all ops in CQ".
+- **(b) CSP keeps completion** — TO finishes in CQ, then CLP award triggered from CSP.
+
+**Decision: pursuing (a).** This also fills a genuine lifecycle gap — CQ currently has no tournament-completion step (pending → active only).
+
+Detail: `docs/csp-ranking-clp-readpath.txt` (inspection 27/07/2026).
 
 ---
 
@@ -140,8 +152,9 @@ _To be filled in by inspecting CSP. Candidates:_
 3. **After a real event runs on Clash Queue successfully:** begin Phase 1 of CSP removal (the "safe to remove early" list), each item gated by a two-repo grep.
 4. **Registration handshake formalised:** confirm CSP → CQ entrant flow works cleanly end-to-end, so players signing up on CSP appear as CQ entrants without manual intervention.
 5. **`tournaments` creator-of-record decided:** lock whether CSP or CQ (or both) create tournaments, and align the field contract.
-6. **Rankings read-path verified:** confirm CSP correctly computes rankings from CQ-written match results. This is the last critical dependency; it must be bulletproof before removing CSP's own scoring pipeline.
+6. **Rankings read-path verified:** VERIFIED 27/07/2026 — Pipeline B safe as-is; Pipeline A (CLP) needs the Complete tournament handshake, tracked separately (§5.1).
 7. **Phase 2 CSP removal:** remove the load-bearing operational code once its CQ replacement is proven and the ranking read-path is verified.
+8. **CQ Complete tournament (CLP handshake):** implement §5.1(a) — placements from Challonge + `award_tournament_points` — before relying on CQ-only ops for ranking events.
 
 ---
 
@@ -149,9 +162,10 @@ _To be filled in by inspecting CSP. Candidates:_
 
 - Does Clash Queue ever write registration status, or is that CSP-only? (§3)
 - Who is the creator-of-record for a tournament — CSP, CQ, or both? (§4)
-- Does CSP read `finish_events` for detailed stats, or only `matches`/`match_players` for rankings? (affects what CQ must keep stable)
+- Does CSP read `finish_events` for detailed stats, or only `matches`/`match_players` for rankings? **Answered 27/07/2026:** yes — Pipeline B reads `finish_events` (`scorer_player_id`, `finish_type`) for PPS/finish counts, plus `match_players.winner` and `matches.status='submitted'`. CQ already writes these. CLP (Pipeline A) does not read match tables — see §5.1.
 - Is `is_ranking_tournament` a CSP field (ranking domain) or a CQ field (set at creation)? Currently contested.
 - What's the migration plan if a CSP-written table needs its schema changed to suit CQ? (coordinated migration across both repos)
+- Under §5.1(a), CQ will call `award_tournament_points`, which writes `players.ranking_points` / `tournament_entrants.points_awarded`. Confirm ownership map exception: CQ may invoke that RPC at completion without becoming writer-of-record for player profiles.
 
 ---
 

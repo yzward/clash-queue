@@ -1,0 +1,227 @@
+CSP ranking / CLP read-path inspection
+Date: 27/07/2026
+Repos: CSP_V2 + clash-queue (inspection only — nothing modified)
+Purpose: Critical read-path that must keep working when Clash Queue becomes
+         the writer of match results.
+
+═══════════════════════════════════════════════════════════════════════════════
+VERDICT (short)
+═══════════════════════════════════════════════════════════════════════════════
+
+Match-table fields CQ writes are enough for CSP's stats / W-L / PPS path.
+They are NOT what drives CLP (players.ranking_points).
+
+CLP never reads match results. It needs tournament_entrants.placement +
+award_tournament_points RPC. CQ does not call that today.
+
+| Path                              | Safe if CQ owns match writes?                          |
+|-----------------------------------|--------------------------------------------------------|
+| Stats / W-L / PPS / player_stats  | YES as-is — CQ writes the fields these paths read      |
+| CLP (ranking_points)              | NOT closed by match writes alone — needs placements +  |
+|                                   | award_tournament_points (still CSP-side today)         |
+
+Bottom line: match read-path is compatible. The real gap is the post-event
+placement → RPC step, which still lives on CSP and is not produced by CQ's
+submit pipeline.
+
+═══════════════════════════════════════════════════════════════════════════════
+TWO PIPELINES — DO NOT CONFLATE
+═══════════════════════════════════════════════════════════════════════════════
+
+A. CLP award — updates players.ranking_points
+B. Rankings display / stats — W-L, finishes, PPS tiebreakers
+
+═══════════════════════════════════════════════════════════════════════════════
+A. CLP AWARD (award_tournament_points RPC)
+═══════════════════════════════════════════════════════════════════════════════
+
+Live function: public.award_tournament_points(t_id uuid) → jsonb
+(SECURITY DEFINER, verified on Supabase ictdttpregkjjadxdhbu)
+
+Tables + fields READ:
+  tournaments
+    - is_ranking_tournament   (skip if false / casual)
+    - tier_multiplier
+  tournament_entrants
+    - player_id
+    - placement               (only rows where placement IS NOT NULL)
+    - points_awarded          (subtract prior award before re-awarding)
+  points_scale
+    - placement
+    - points                  (highest tier where scale.placement <= entrant.placement)
+  players
+    - ranking_points          (written; not used as input logic)
+
+Does NOT read:
+  matches, match_players, finish_events
+  matches.winner_id, match_players.sets_won, match_players.total_points
+
+App-side after complete (CSP app/api/tournaments/[id]/route.ts action=complete):
+  - Also reads points_scale.points where placement = 0 (attendance top-up)
+  - Writes tournament_entrants.points_awarded + players.ranking_points for zeros
+
+Also called from:
+  - app/api/bracket-engine/placements/route.ts
+  - app/api/bracket-engine/complete/route.ts
+  - NOT called by challonge/sync-placements (that writes placement only)
+
+═══════════════════════════════════════════════════════════════════════════════
+B. RANKINGS DISPLAY / STATS
+═══════════════════════════════════════════════════════════════════════════════
+
+Sources:
+  - GET /api/rankings (app/api/rankings/route.ts)
+  - DB refresh_player_stats(p_id) RPC
+  - Triggers on match_players + finish_events → refresh_player_stats
+
+Leaderboard ORDER key: players.ranking_points (from pipeline A)
+
+Tiebreakers / W-L / finishes — tables + fields READ:
+
+  match_players
+    - player_id
+    - winner
+    - match_id
+    → matches played / won
+
+  matches
+    - id
+    - tournament_id
+    - status                  (only status = 'submitted' counts in rankings API
+                               and in refresh_player_stats for W/L)
+
+  tournaments
+    - id
+    - is_ranking_tournament   (must be true to count)
+
+  finish_events
+    - scorer_player_id
+    - finish_type             (EXT/OVR/BUR/SPN/WRN/PEN → PPS)
+    - match_id
+    Note: rankings API only counts finishes on submitted matches.
+          refresh_player_stats finish counts filter ranking tournaments but
+          do NOT require matches.status = 'submitted'.
+
+  tournament_entrants
+    - player_id
+    - tournament_id           (tournaments entered count)
+    - placement               (best_placement in refresh_player_stats)
+
+  player_legacy_stats
+    - legacy counters         (merged into display)
+
+  player_stats
+    - aggregate columns       (cache; API also recomputes live from match rows)
+
+NOT read for ranking/stats:
+  matches.winner_id
+  match_players.sets_won
+  match_players.total_points
+  matches.score1 / score2
+
+═══════════════════════════════════════════════════════════════════════════════
+TRIGGERS — WHAT UPDATES WHAT
+═══════════════════════════════════════════════════════════════════════════════
+
+| Trigger                                              | What updates                          |
+|------------------------------------------------------|---------------------------------------|
+| Tournament complete (CSP action=complete,            | tournament_entrants.placement →       |
+| bracket-engine placements/complete)                  | award_tournament_points →             |
+|                                                      | players.ranking_points                |
+| Match submit                                         | Does NOT award CLP                    |
+| DB triggers on match_players / finish_events         | refresh_player_stats → player_stats   |
+| INSERT/UPDATE/DELETE                                 |                                       |
+| Manual /api/admin/refresh-stats                      | Re-runs refresh_player_stats          |
+| Challonge sync-placements                            | placement only — no RPC               |
+
+Triggers verified live:
+  finish_events → trg_refresh_finish_stats → refresh_player_stats(scorer)
+  match_players → trg_refresh_match_player_stats → refresh_player_stats(player)
+
+═══════════════════════════════════════════════════════════════════════════════
+DIRECT VS INTERMEDIATE
+═══════════════════════════════════════════════════════════════════════════════
+
+CLP: intermediate = tournament_entrants.placement (+ points_scale).
+     Not derived from match rows.
+
+W-L / finishes: mostly direct from match_players / finish_events / matches.
+                player_stats is a cache refreshed by triggers.
+
+═══════════════════════════════════════════════════════════════════════════════
+GAP ANALYSIS VS CQ SUBMIT
+═══════════════════════════════════════════════════════════════════════════════
+
+CQ tablet submit (clash-queue/lib/data/tablet.ts) writes:
+
+  matches:
+    status = 'submitted'
+    winner_id
+    score1, score2
+    sets_won1, sets_won2
+    current_set
+    (+ force_submitted / force_submit_reason on force path)
+
+  match_players:
+    sets_won
+    total_points
+    winner                  (boolean)
+
+  finish_events (during scoring):
+    scorer_player_id
+    finish_type
+    points
+    set_number
+
+| CSP ranking needs                              | CQ writes it?                          |
+|------------------------------------------------|----------------------------------------|
+| matches.status = 'submitted'                   | YES                                    |
+| match_players.winner                           | YES                                    |
+| finish_events.scorer_player_id + finish_type   | YES (normal scoring)                   |
+| tournaments.is_ranking_tournament              | YES (CQ create/settings)               |
+| matches.winner_id                              | YES — but ranking does NOT read it     |
+| sets_won / total_points                        | YES — but ranking does NOT read them   |
+| tournament_entrants.placement                  | NO — CQ never writes placements        |
+| Call award_tournament_points                   | NO — no CQ references                  |
+
+Extra nuance:
+  Force-submit with few/no finish events still gets W/L via winner, but
+  PPS/finish counts stay thin — same shape as CSP force paths.
+
+  PEN convention: scorer_player_id = fouling player (stats attribution).
+  CQ scoring must keep that (same as CSP build-state).
+
+═══════════════════════════════════════════════════════════════════════════════
+KEY CSP PATHS
+═══════════════════════════════════════════════════════════════════════════════
+
+  Live RPC: award_tournament_points(t_id)
+  Live RPC: refresh_player_stats(p_id)
+  Complete: app/api/tournaments/[id]/route.ts (action=complete)
+  Placements writeback: app/api/bracket-engine/placements/route.ts
+  Rankings API: app/api/rankings/route.ts
+  Rankings UI: app/rankings/page.tsx
+  Manual stats refresh: app/api/admin/refresh-stats/route.ts
+
+═══════════════════════════════════════════════════════════════════════════════
+KEY CQ PATHS
+═══════════════════════════════════════════════════════════════════════════════
+
+  Submit / force-submit: lib/data/tablet.ts
+  Challonge report after submit: lib/data/matches.ts (reportSubmittedMatchToChallonge)
+  Ranking flag on create/settings: lib/data/tournaments.ts (is_ranking_tournament)
+  CQ does NOT reference award_tournament_points, points_awarded, or placement writes
+
+═══════════════════════════════════════════════════════════════════════════════
+WHAT THIS MEANS FOR SEPARATION
+═══════════════════════════════════════════════════════════════════════════════
+
+1. CQ can own matches / match_players / finish_events without adding extra
+   match columns for CSP ranking/stats.
+
+2. After a CQ-run ranking event, someone must still:
+   a) write tournament_entrants.placement, and
+   b) call award_tournament_points (or CSP complete / placements writeback).
+
+3. Until that handshake exists, CLP will stay stale even when every match
+   is submitted correctly from CQ.
