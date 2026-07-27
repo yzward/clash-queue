@@ -1380,6 +1380,30 @@ export async function reportSubmittedMatchToChallonge(
 
   const scoresDisplay = formatScoresForChallonge(perSetScores);
 
+  console.info(
+    "[challonge:score-format]",
+    JSON.stringify({
+      phase: "reportSubmittedMatchToChallonge_derived",
+      matchId,
+      forceSubmitted,
+      buildState: {
+        score1: finalState.score1,
+        score2: finalState.score2,
+        setsWon1: finalState.setsWon1,
+        setsWon2: finalState.setsWon2,
+        currentSet: finalState.currentSet,
+        matchComplete: finalState.matchComplete,
+        winnerId: finalState.winnerId,
+      },
+      setBreakdown: totals.setBreakdown,
+      perSetScores,
+      scoresDisplay,
+      eventCount: scoreEvents.length,
+      pointCap,
+      setsToWin,
+    })
+  );
+
   try {
     await reportMatchResult(challongeId, challongeMatchId, {
       winnerParticipantId: winnerParticipant,
