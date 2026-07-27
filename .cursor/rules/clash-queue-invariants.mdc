@@ -98,3 +98,7 @@ Clash Queue is a tournament management platform for TOs running Clash League NZ 
 - Multi-step tournament result mutations must be run in this order and verified: (1) set placement, (2) set points_awarded, (3) increment ranking_points. Step 3 is not safely reversible without a recalc pass. UPDATE returns "Success. No rows returned"; always follow up with a SELECT count to verify.
 - Use `.maybeSingle()` on SELECT lookups. `.single()` post-insert `.select().single()` is fine.
 - Case-insensitive matching (`ilike` or `lower(trim(...))`) is essential when matching external names (Challonge display names) against CSP player records.
+
+## Boundary with CSP
+
+Before removing or heavily modifying anything that touches a shared table (`players`, `tournaments`, `tournament_entrants`, `matches`, `match_players`, `finish_events`, `courts`, `rankings`), consult `docs/clash-queue-csp-boundary.md`. One app is writer-of-record per table; the other only reads. Never remove CSP code that touches a table Clash Queue reads/writes without a two-repo grep first.
