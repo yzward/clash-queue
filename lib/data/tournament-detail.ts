@@ -15,12 +15,14 @@ export type TournamentDetail = {
   format: string | null;
   capacity: number | null;
   deleted_at: string | null;
+  completed_at: string | null;
   entrants: {
     total: number;
     confirmed: number;
     pending: number;
   };
   matchCount: number;
+  submittedMatchCount: number;
   courtCount: number;
 };
 
@@ -34,7 +36,7 @@ export async function getTournamentDetail(
       admin
         .from("tournaments")
         .select(
-          "id, name, status, held_at, challonge_id, tablet_pin, bracket_engine_id, is_ranking_tournament, is_major_event, stage1_format, format, capacity, deleted_at"
+          "id, name, status, held_at, challonge_id, tablet_pin, bracket_engine_id, is_ranking_tournament, is_major_event, stage1_format, format, capacity, deleted_at, completed_at"
         )
         .eq("id", id)
         .maybeSingle(),
@@ -42,10 +44,7 @@ export async function getTournamentDetail(
         .from("tournament_entrants")
         .select("entrant_status")
         .eq("tournament_id", id),
-      admin
-        .from("matches")
-        .select("id", { count: "exact", head: true })
-        .eq("tournament_id", id),
+      admin.from("matches").select("status").eq("tournament_id", id),
       admin
         .from("courts")
         .select("id", { count: "exact", head: true })
@@ -67,6 +66,11 @@ export async function getTournamentDetail(
     (e) => e.entrant_status === "pending"
   ).length;
 
+  const matchRows = (matchResult.data ?? []) as { status: string | null }[];
+  const submittedMatchCount = matchRows.filter(
+    (m) => String(m.status) === "submitted"
+  ).length;
+
   return {
     id: tournament.id as string,
     name: tournament.name as string,
@@ -82,12 +86,14 @@ export async function getTournamentDetail(
     format: (tournament.format as string | null) ?? null,
     capacity: (tournament.capacity as number | null) ?? null,
     deleted_at: (tournament.deleted_at as string | null) ?? null,
+    completed_at: (tournament.completed_at as string | null) ?? null,
     entrants: {
       total: entrantRows.length,
       confirmed,
       pending,
     },
-    matchCount: matchResult.count ?? 0,
+    matchCount: matchRows.length,
+    submittedMatchCount,
     courtCount: courtResult.count ?? 0,
   };
 }

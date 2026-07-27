@@ -74,12 +74,14 @@ import {
 } from "@/lib/data/matches";
 import {
   clearTournamentChallongeReferences,
+  completeTournament,
   countChallongeLinkedData,
   InvalidTabletPinError,
   setTournamentChallongeId,
   setTournamentTabletPin,
   setTournamentType,
   startTournament,
+  type CompleteTournamentResult,
   type StartedTournament,
   type TournamentChallongeRow,
   type TournamentTypeRow,
@@ -750,6 +752,31 @@ export async function startTournamentAction(
     console.error("[startTournamentAction]", err);
     const message =
       err instanceof Error ? err.message : "Failed to start tournament";
+    return { ok: false, error: message };
+  }
+}
+
+export type CompleteTournamentActionResult = CompleteTournamentResult;
+
+export async function completeTournamentAction(
+  tournamentId: string
+): Promise<CompleteTournamentActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const result = await completeTournament(tournamentId, auth.playerId);
+    if (result.ok || result.error === "clp_award_failed") {
+      revalidatePath(`/t/${tournamentId}`);
+      revalidatePath("/dashboard");
+    }
+    return result;
+  } catch (err) {
+    console.error("[completeTournamentAction]", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to complete tournament";
     return { ok: false, error: message };
   }
 }

@@ -5,6 +5,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
 import { BracketTab } from "@/components/bracket-tab";
+import { CompleteTournamentCard } from "@/components/complete-tournament-card";
 import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
 import { SettingsTab } from "@/components/settings-tab";
@@ -18,6 +19,10 @@ import {
   getCourtStatuses,
   listMatchesWithContext,
 } from "@/lib/data/matches";
+import {
+  listCompletedPlacements,
+  type CompletedPlacementRow,
+} from "@/lib/data/tournaments";
 import {
   getTournamentDetail,
   type TournamentDetail,
@@ -201,14 +206,17 @@ function StatCard({
 function OverviewTab({
   tournament,
   preflight,
+  placements,
 }: {
   tournament: TournamentDetail;
   preflight: PreflightResult | null;
+  placements: CompletedPlacementRow[];
 }) {
   const isLive =
     tournament.status === "active" || tournament.status === "in_progress";
   const isPending = tournament.status === "pending";
   const isCompleted = tournament.status === "completed";
+  const isRanking = tournament.is_ranking_tournament !== false;
 
   return (
     <div className="space-y-4">
@@ -228,7 +236,11 @@ function OverviewTab({
         <StatCard
           label="Matches"
           value={tournament.matchCount}
-          meta={tournament.matchCount > 0 ? "generated" : "none yet"}
+          meta={
+            tournament.matchCount > 0
+              ? `${tournament.submittedMatchCount} submitted`
+              : "none yet"
+          }
           action={
             tournament.challonge_id && tournament.matchCount > 0 ? (
               <SyncMatchesButton tournamentId={tournament.id} />
@@ -276,23 +288,14 @@ function OverviewTab({
               </div>
             </div>
           ) : null}
-          <div
-            className="rounded-[10px] px-4 py-5"
-            style={{
-              background: "rgba(34,197,94,0.05)",
-              border: "1px solid rgba(34,197,94,0.15)",
-              borderTop: "2px solid #22c55e",
-            }}
-          >
-            <p className="text-sm font-medium text-white">Tournament is live</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {tournament.matchCount} match
-              {tournament.matchCount === 1 ? "" : "es"}
-            </p>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Live match management coming soon
-            </p>
-          </div>
+          <CompleteTournamentCard
+            tournamentId={tournament.id}
+            tournamentName={tournament.name}
+            isRankingTournament={isRanking}
+            challongeId={tournament.challonge_id}
+            matchCount={tournament.matchCount}
+            submittedMatchCount={tournament.submittedMatchCount}
+          />
         </div>
       ) : null}
 
@@ -317,7 +320,49 @@ function OverviewTab({
           <p className="mt-1 text-sm text-muted-foreground">
             {tournament.matchCount} match
             {tournament.matchCount === 1 ? "" : "es"} played
+            {tournament.completed_at
+              ? ` · ${formatNZDate(tournament.completed_at)}`
+              : ""}
           </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {isRanking ? "Ranked — CLP awarded from placements" : "Casual — no CLP"}
+          </p>
+
+          {placements.length > 0 ? (
+            <div className="mt-4 overflow-hidden rounded-lg border border-white/8">
+              <div className="grid grid-cols-[48px_1fr_72px] gap-2 border-b border-white/8 bg-white/[0.03] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <span>Rank</span>
+                <span>Player</span>
+                <span className="text-right">{isRanking ? "CLP" : ""}</span>
+              </div>
+              <ul>
+                {placements.map((row) => (
+                  <li
+                    key={`${row.player_id}-${row.placement}`}
+                    className="grid grid-cols-[48px_1fr_72px] gap-2 border-b border-white/5 px-3 py-2 last:border-b-0"
+                  >
+                    <span className="text-sm font-semibold text-white">
+                      {row.placement}
+                    </span>
+                    <span className="truncate text-sm text-white/90">
+                      {row.display_name}
+                    </span>
+                    <span className="text-right text-sm text-muted-foreground">
+                      {isRanking
+                        ? row.points_awarded != null
+                          ? `+${row.points_awarded}`
+                          : "—"
+                        : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-muted-foreground">
+              No placements recorded.
+            </p>
+          )}
         </div>
       ) : null}
     </div>
@@ -392,6 +437,11 @@ export default async function TournamentDetailPage({
   if (!tournament) {
     notFound();
   }
+
+  const placements =
+    tournament.status === "completed"
+      ? await listCompletedPlacements(tournament.id)
+      : [];
 
   const courtStatuses = await getCourtStatuses(id, matchesWithContext);
 
@@ -490,6 +540,7 @@ export default async function TournamentDetailPage({
         {activeTab === "overview" ? (
           <OverviewTab
             tournament={tournament}
+            placements={placements}
             preflight={
               tournament.status === "pending" ||
               tournament.status === "active" ||

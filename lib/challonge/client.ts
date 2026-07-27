@@ -622,6 +622,50 @@ function extractStartErrorMessage(err: unknown): string {
   return "Couldn't start Challonge bracket";
 }
 
+/**
+ * Finalise a Challonge tournament so participant final_rank values are set.
+ * Docs: PUT change_state with attributes.state = "finalize"
+ * (from awaiting_review → complete). Idempotent when already complete.
+ */
+export async function finalizeChallongeTournament(
+  challongeId: string
+): Promise<ChallongeTournament> {
+  const current = await getChallongeTournament(challongeId);
+  if (current.state === "complete") {
+    return current;
+  }
+
+  try {
+    const doc = await challongeRequest<JsonApiDocument>(
+      `/tournaments/${encodeURIComponent(challongeId)}/change_state.json`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          data: {
+            type: "TournamentState",
+            attributes: { state: "finalize" },
+          },
+        }),
+      }
+    );
+
+    if (!doc.data || Array.isArray(doc.data)) {
+      return getChallongeTournament(challongeId);
+    }
+
+    return normaliseTournament(doc.data);
+  } catch (err) {
+    const message = extractStartErrorMessage(err);
+    const status = err instanceof ChallongeError ? err.status : 400;
+    const body = err instanceof ChallongeError ? err.body : undefined;
+    throw new ChallongeStartError(
+      message || "Couldn't finalise Challonge tournament",
+      status,
+      body
+    );
+  }
+}
+
 function flattenPushedParticipant(
   resource: JsonApiResource
 ): ChallongePushedParticipant {

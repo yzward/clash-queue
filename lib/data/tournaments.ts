@@ -1,6 +1,10 @@
 import type { ChallongeTournament } from "@/lib/challonge/types";
 import {
+  finalizeChallongeTournament,
+  getChallongeParticipants,
+  getChallongeTournament,
   getChallongeTournamentSafe,
+  getChallongeViewerUrls,
   parseChallongeIdentifier,
 } from "@/lib/challonge/client";
 import { runPreflightChecks } from "@/lib/preflight/checks";
@@ -675,5 +679,360 @@ export async function setTournamentTabletPin(
   return {
     id: String(data.id),
     name: String(data.name),
+  };
+}
+
+export type ChallongeStandingRow = {
+  challongeParticipantId: string;
+  finalRank: number;
+  name: string;
+};
+
+/**
+ * Fetch Challonge participants and return those with a final_rank set.
+ * Source: GET /tournaments/{id}/participants.json → attributes.final_rank
+ * (populated after Challonge state = complete / finalize).
+ */
+export async function getChallongeFinalStandings(
+  challongeId: string
+): Promise<{
+  tournamentState: string;
+  standings: ChallongeStandingRow[];
+  publicUrl: string;
+}> {
+  const tournament = await getChallongeTournament(challongeId);
+  const participants = await getChallongeParticipants(challongeId);
+  const standings: ChallongeStandingRow[] = [];
+
+  for (const p of participants) {
+    if (typeof p.final_rank !== "number" || p.final_rank < 1) continue;
+    standings.push({
+      challongeParticipantId: String(p.id),
+      finalRank: p.final_rank,
+      name: p.name,
+    });
+  }
+
+  standings.sort((a, b) => a.finalRank - b.finalRank);
+
+  return {
+    tournamentState: tournament.state,
+    standings,
+    publicUrl: getChallongeViewerUrls(challongeId).publicUrl,
+  };
+}
+
+export type MatchSubmissionCounts = {
+  total: number;
+  submitted: number;
+  unsubmitted: number;
+};
+
+export async function getMatchSubmissionCounts(
+  tournamentId: string
+): Promise<MatchSubmissionCounts> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("matches")
+    .select("status")
+    .eq("tournament_id", tournamentId);
+
+  if (error) {
+    throw new Error(`Failed to load matches: ${error.message}`);
+  }
+
+  const rows = data ?? [];
+  const submitted = rows.filter((r) => String(r.status) === "submitted").length;
+  return {
+    total: rows.length,
+    submitted,
+    unsubmitted: rows.length - submitted,
+  };
+}
+
+export type CompletedPlacementRow = {
+  placement: number;
+  points_awarded: number | null;
+  player_id: string;
+  display_name: string;
+};
+
+export async function listCompletedPlacements(
+  tournamentId: string
+): Promise<CompletedPlacementRow[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("tournament_entrants")
+    .select(
+      "placement, points_awarded, player_id, players!tournament_entrants_player_id_fkey(display_name)"
+    )
+    .eq("tournament_id", tournamentId)
+    .not("placement", "is", null)
+    .order("placement", { ascending: true });
+
+  if (error) {
+    console.error("[tournaments:listCompletedPlacements]", error);
+    throw new Error(`Failed to load placements: ${error.message}`);
+  }
+
+  return (data ?? []).map((row) => {
+    const playersRaw = row.players as
+      | { display_name?: string | null }
+      | { display_name?: string | null }[]
+      | null;
+    const player = Array.isArray(playersRaw) ? playersRaw[0] : playersRaw;
+    return {
+      placement: Number(row.placement),
+      points_awarded:
+        typeof row.points_awarded === "number" ? row.points_awarded : null,
+      player_id: String(row.player_id),
+      display_name: player?.display_name?.trim() || "Unknown player",
+    };
+  });
+}
+
+export type CompleteTournamentResult =
+  | {
+      ok: true;
+      placementsWritten: number;
+      unmatchedStandings: number;
+      clpAwarded: boolean;
+      rpcResult: unknown;
+      completed_at: string;
+    }
+  | {
+      ok: false;
+      error: string;
+      unsubmittedCount?: number;
+      submittedCount?: number;
+      totalMatches?: number;
+      challongePublicUrl?: string;
+      challongeState?: string;
+      placementsWritten?: number;
+      unmatchedStandings?: number;
+      message?: string;
+    };
+
+/**
+ * Capstone lifecycle: active/in_progress → completed.
+ * Writes tournament_entrants.placement from Challonge final_rank, then
+ * calls award_tournament_points for ranking tournaments.
+ */
+export async function completeTournament(
+  tournamentId: string,
+  actorPlayerId: string
+): Promise<CompleteTournamentResult> {
+  const admin = createAdminClient();
+
+  const { data: tournament, error: tError } = await admin
+    .from("tournaments")
+    .select(
+      "id, name, status, challonge_id, is_ranking_tournament, deleted_at"
+    )
+    .eq("id", tournamentId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (tError) {
+    throw new Error(`Failed to load tournament: ${tError.message}`);
+  }
+  if (!tournament) {
+    return { ok: false, error: "not_found", message: "Tournament not found" };
+  }
+
+  const status = String(tournament.status ?? "");
+  if (status === "completed") {
+    return {
+      ok: false,
+      error: "already_completed",
+      message: "Tournament is already completed",
+    };
+  }
+  if (status !== "active" && status !== "in_progress") {
+    return {
+      ok: false,
+      error: "invalid_status",
+      message: `Cannot complete tournament from status '${status}'`,
+    };
+  }
+
+  const counts = await getMatchSubmissionCounts(tournamentId);
+  if (counts.total === 0) {
+    return {
+      ok: false,
+      error: "matches_incomplete",
+      unsubmittedCount: 0,
+      submittedCount: 0,
+      totalMatches: 0,
+      message: "No matches to finalise — generate and submit matches first.",
+    };
+  }
+  if (counts.unsubmitted > 0) {
+    return {
+      ok: false,
+      error: "matches_incomplete",
+      unsubmittedCount: counts.unsubmitted,
+      submittedCount: counts.submitted,
+      totalMatches: counts.total,
+      message: `All matches must be submitted before completing. ${counts.unsubmitted} still open.`,
+    };
+  }
+
+  const challongeIdRaw = tournament.challonge_id
+    ? String(tournament.challonge_id)
+    : null;
+  if (!challongeIdRaw) {
+    return {
+      ok: false,
+      error: "challonge_required",
+      message:
+        "Complete tournament currently requires a Challonge-linked bracket to derive placements.",
+    };
+  }
+
+  let standingsResult = await getChallongeFinalStandings(challongeIdRaw);
+
+  // If Challonge hasn't published ranks yet, try finalize (awaiting_review → complete).
+  if (standingsResult.standings.length === 0) {
+    const state = standingsResult.tournamentState;
+    if (state === "awaiting_review" || state === "underway") {
+      try {
+        await finalizeChallongeTournament(challongeIdRaw);
+        standingsResult = await getChallongeFinalStandings(challongeIdRaw);
+      } catch (err) {
+        console.error("[tournaments:complete] finalize", err);
+        return {
+          ok: false,
+          error: "challonge_finalize_failed",
+          challongePublicUrl: standingsResult.publicUrl,
+          challongeState: state,
+          message:
+            err instanceof Error
+              ? err.message
+              : "Couldn't finalise Challonge tournament",
+        };
+      }
+    }
+  }
+
+  if (standingsResult.standings.length === 0) {
+    return {
+      ok: false,
+      error: "challonge_not_finalised",
+      challongePublicUrl: standingsResult.publicUrl,
+      challongeState: standingsResult.tournamentState,
+      message:
+        "Challonge has no final ranks yet. Finalise the bracket on Challonge, then try again.",
+    };
+  }
+
+  const { data: entrants, error: entrantsError } = await admin
+    .from("tournament_entrants")
+    .select("id, player_id, startgg_entrant_id")
+    .eq("tournament_id", tournamentId);
+
+  if (entrantsError) {
+    throw new Error(`Failed to load entrants: ${entrantsError.message}`);
+  }
+
+  const entrantByChallongeId = new Map<
+    string,
+    { id: string; player_id: string }
+  >();
+  for (const e of entrants ?? []) {
+    if (e.startgg_entrant_id == null) continue;
+    entrantByChallongeId.set(String(e.startgg_entrant_id), {
+      id: String(e.id),
+      player_id: String(e.player_id),
+    });
+  }
+
+  const updates: { entrantId: string; placement: number }[] = [];
+  let unmatchedStandings = 0;
+  for (const standing of standingsResult.standings) {
+    const entrant = entrantByChallongeId.get(standing.challongeParticipantId);
+    if (!entrant) {
+      unmatchedStandings += 1;
+      continue;
+    }
+    updates.push({ entrantId: entrant.id, placement: standing.finalRank });
+  }
+
+  if (updates.length === 0) {
+    return {
+      ok: false,
+      error: "placement_mapping_failed",
+      unmatchedStandings,
+      message:
+        "Could not map Challonge standings to local entrants (missing startgg_entrant_id). Sync participants, then try again.",
+      challongePublicUrl: standingsResult.publicUrl,
+    };
+  }
+
+  for (const u of updates) {
+    const { error: placeError } = await admin
+      .from("tournament_entrants")
+      .update({ placement: u.placement })
+      .eq("id", u.entrantId);
+    if (placeError) {
+      console.error("[tournaments:complete] placement", placeError);
+      throw new Error(`Failed to write placement: ${placeError.message}`);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const { data: updated, error: statusError } = await admin
+    .from("tournaments")
+    .update({
+      status: "completed",
+      completed_at: now,
+      completed_by: actorPlayerId,
+    })
+    .eq("id", tournamentId)
+    .in("status", ["active", "in_progress"])
+    .is("deleted_at", null)
+    .select("id, completed_at")
+    .maybeSingle();
+
+  if (statusError) {
+    throw new Error(`Failed to mark completed: ${statusError.message}`);
+  }
+  if (!updated) {
+    return {
+      ok: false,
+      error: "already_completed",
+      message: "Tournament is already completed",
+    };
+  }
+
+  const isRanking = tournament.is_ranking_tournament !== false;
+  let clpAwarded = false;
+  let rpcResult: unknown = null;
+
+  if (isRanking) {
+    const { data: rpcData, error: rpcError } = await admin.rpc(
+      "award_tournament_points",
+      { t_id: tournamentId }
+    );
+    if (rpcError) {
+      console.error("[tournaments:complete] award_tournament_points", rpcError);
+      return {
+        ok: false,
+        error: "clp_award_failed",
+        placementsWritten: updates.length,
+        message: `Placements saved and tournament completed, but CLP award failed: ${rpcError.message}`,
+      };
+    }
+    rpcResult = rpcData;
+    clpAwarded = true;
+  }
+
+  return {
+    ok: true,
+    placementsWritten: updates.length,
+    unmatchedStandings,
+    clpAwarded,
+    rpcResult,
+    completed_at: (updated.completed_at as string) ?? now,
   };
 }
