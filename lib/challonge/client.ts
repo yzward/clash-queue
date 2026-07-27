@@ -966,21 +966,6 @@ export async function reportMatchResult(
   const p2Set = input.perSetScores.map((s) => s.p2).join(",");
   const p1Id = String(input.player1ParticipantId);
   const p2Id = String(input.player2ParticipantId);
-  const scoresDisplay = formatScoresForChallonge(input.perSetScores);
-
-  console.info(
-    "[challonge:score-format]",
-    JSON.stringify({
-      phase: "reportMatchResult_payload",
-      perSetScores: input.perSetScores,
-      scoresDisplay,
-      score_set: { p1: p1Set || "0", p2: p2Set || "0" },
-      winnerParticipantId: expectedWinner,
-      player1ParticipantId: p1Id,
-      player2ParticipantId: p2Id,
-      challongeMatchId,
-    })
-  );
 
   const body = {
     data: {
