@@ -32,6 +32,12 @@ import {
   type PlayerSearchResult,
 } from "@/lib/data/players";
 import {
+  getImportableSignups,
+  importSignupsAsEntrants,
+  type GuestSignup,
+  type ImportableSignup,
+} from "@/lib/data/signup-import";
+import {
   getTeamRosterForBulkAdd,
   listTeams,
   type TeamListItem,
@@ -357,6 +363,88 @@ export async function bulkAddEntrantsAction(
     const message =
       err instanceof Error ? err.message : "Failed to bulk add players";
     console.error("[bulkAddEntrantsAction]", err);
+    return { ok: false, error: message };
+  }
+}
+
+export type GetImportableSignupsActionResult =
+  | {
+      ok: true;
+      importable: ImportableSignup[];
+      alreadyEntrants: number;
+      guests: GuestSignup[];
+    }
+  | { ok: false; error: string };
+
+export async function getImportableSignupsAction(
+  tournamentId: string
+): Promise<GetImportableSignupsActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  try {
+    const result = await getImportableSignups(tournamentId);
+    return {
+      ok: true,
+      importable: result.importable,
+      alreadyEntrants: result.alreadyEntrants,
+      guests: result.guests,
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to load CSP sign-ups";
+    console.error("[getImportableSignupsAction]", err);
+    return { ok: false, error: message };
+  }
+}
+
+export type ImportSignupsAsEntrantsActionResult =
+  | {
+      ok: true;
+      imported: number;
+      skipped: number;
+      entrants: Entrant[];
+    }
+  | { ok: false; error: string };
+
+export async function importSignupsAsEntrantsAction(
+  tournamentId: string,
+  playerIds: string[]
+): Promise<ImportSignupsAsEntrantsActionResult> {
+  const auth = await requireTO();
+  if (!auth.authorised) {
+    return { ok: false, error: "Not authorised" };
+  }
+
+  if (!Array.isArray(playerIds) || playerIds.length === 0) {
+    return { ok: false, error: "Select at least one player" };
+  }
+  if (playerIds.length > 100) {
+    return { ok: false, error: "You can import at most 100 players at once" };
+  }
+  if (!playerIds.every((id) => typeof id === "string" && id.trim())) {
+    return { ok: false, error: "Invalid player selection" };
+  }
+
+  try {
+    const result = await importSignupsAsEntrants(
+      tournamentId,
+      playerIds,
+      auth.playerId
+    );
+    revalidatePath(`/t/${tournamentId}`);
+    return {
+      ok: true,
+      imported: result.imported,
+      skipped: result.skipped,
+      entrants: result.entrants,
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to import sign-ups";
+    console.error("[importSignupsAsEntrantsAction]", err);
     return { ok: false, error: message };
   }
 }

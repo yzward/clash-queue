@@ -20,6 +20,7 @@ import {
 } from "@/app/t/[id]/actions";
 import { AddPlayerDialog } from "@/components/add-player-dialog";
 import { BulkAddDialog } from "@/components/bulk-add-dialog";
+import { ImportSignupsDialog } from "@/components/import-signups-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -105,6 +106,9 @@ function formatSubLine(entrant: Entrant): string {
 
   if (entrant.registration_source === "humanitix") {
     return "confirmed - Humanitix";
+  }
+  if (entrant.registration_source === "csp_import") {
+    return "confirmed - CSP import";
   }
   if (entrant.registration_source === "manual") {
     return "confirmed - manual";
@@ -263,6 +267,7 @@ export function PlayersTab({
   const challongeLinked = Boolean(challongeId);
   const [addOpen, setAddOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [importSignupsOpen, setImportSignupsOpen] = useState(false);
 
   const [withdrawTarget, setWithdrawTarget] = useState<Entrant | null>(null);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
@@ -423,6 +428,16 @@ export function PlayersTab({
             type="button"
             variant="outline"
             size="sm"
+            onClick={() => setImportSignupsOpen(true)}
+            style={{ borderColor: "rgba(255,255,255,0.15)" }}
+          >
+            Import from CSP
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
             onClick={() => setBulkOpen(true)}
             style={{ borderColor: "rgba(255,255,255,0.15)" }}
           >
@@ -518,6 +533,13 @@ export function PlayersTab({
       <BulkAddDialog
         open={bulkOpen}
         onOpenChange={setBulkOpen}
+        tournamentId={tournamentId}
+        onSuccess={handleBulkSuccess}
+      />
+
+      <ImportSignupsDialog
+        open={importSignupsOpen}
+        onOpenChange={setImportSignupsOpen}
         tournamentId={tournamentId}
         onSuccess={handleBulkSuccess}
       />
