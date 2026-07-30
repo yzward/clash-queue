@@ -135,3 +135,15 @@ If Clash Queue ends up being considered as ABO's platform:
 **Reconsider when:** After Step 10 lifecycle gating is in. If TOs can still reach the drifted state via edge cases (Challonge auto-activation, manual DB updates), ship Fix A as a safety net.
 
 ---
+
+## 2026-07-31 — Parked: tablet scorer portrait layout
+
+**Parked:** The tablet scorer (`/tablet/[courtId]`) is designed for landscape and renders correctly there — mirrored 6-button grid, clean columns. In portrait (e.g. a ref using a phone held upright), the finish-button grid overflows horizontally: the six buttons per row squash and run off the screen edge, overlapping their point-value labels.
+
+**Why parked:** Not blocking — event tablets will be landscape on stands. Portrait support is wanted long-term (refs using phones, smaller devices).
+
+**Fix direction when picked up:** Make the finish-button grid responsive — in portrait, reflow to fewer columns (e.g. 3-wide per player stacked, or 2 rows of 3 becoming a tighter layout), OR show a lightweight "rotate to landscape" hint below a usable-but-compact fallback. Prefer responsive reflow over forcing rotation.
+
+**Status:** Confirmed working in landscape 28/07/2026; portrait deferred.
+
+---
