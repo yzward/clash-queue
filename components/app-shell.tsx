@@ -13,11 +13,9 @@ import {
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
-  { href: "/dashboard", label: "Events" },
-  { href: "/players", label: "Players" },
-  { href: "/settings", label: "Settings" },
-] as const;
+// Players (/players) and Settings (/settings) removed pending global page decisions.
+// Per-tournament Players/Settings tabs live under /t/[id] — not top-nav destinations.
+const NAV_ITEMS = [{ href: "/dashboard", label: "Events" }] as const;
 
 const LOGO_CLIP =
   "polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px))";
