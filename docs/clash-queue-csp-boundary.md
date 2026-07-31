@@ -1,7 +1,7 @@
 # Clash Queue ↔ CSP — Boundary & Separation Plan
 
 **Status:** Living document
-**Last updated:** 27/07/2026
+**Last updated:** 31/07/2026
 **Owner:** Armani
 
 This document defines what Clash Queue and ClashStatsPro (CSP) each own, the contract between them across the shared Supabase database, and a phased plan for safely removing tournament-operations code from CSP once Clash Queue takes over.
@@ -74,6 +74,32 @@ This is the most important contract because it's the daily workflow: players sig
 
 **Open question:** Should CQ ever change an entrant's registration status, or is that CSP-only? Proposed: CQ can confirm/withdraw entrants operationally (event-day reality), but the source-of-truth registration record stays a CSP concern. Flag for decision.
 
+### 3.1 Registration display stays on CSP
+
+Community members register and see "you're registered" entirely on CSP — a front-door/community feature, NOT an operation. Removing operations from CSP does not touch it. CSP keeps: the public tournament page, sign-up flow, `event_registrations`, and the "you're registered" indicator (unions `event_registrations` + `tournament_entrants` by `player_id`). Clash Queue only READS sign-ups (via Import from CSP) to build its entrant list.
+
+**Rule of thumb for removal:** if a CSP feature is about SIGNING UP or SEEING you signed up, it stays. If it's about RUNNING the event, it moves to Clash Queue.
+
+### 3.2 Roll call is the registration → operations handoff
+
+Actual workflow: matches/bracket are NOT generated until tournament day, after roll call:
+
+1. Registration accumulates on CSP (before the day)
+2. Tournament day: roll call confirms who's physically present
+3. Import from CSP into Clash Queue at/after roll call
+4. Reconcile: drop no-shows, manually add walk-ups
+5. Generate the bracket
+
+Because the bracket isn't locked until after roll call, late registrations are naturally caught — the import happens late by design. Import is a snapshot taken at roll call, not a live sync. Matches existing practice; no new discipline required.
+
+**Phase 2 nicety:** a roll-call mode or "X new sign-ups since import" indicator to streamline reconcile.
+
+### 3.3 Stream tool decision (deferred, not closed)
+
+Streaming is a THIRD concern — broadcast — distinct from operations (→ CQ) and community (→ CSP). Stream overlays read shared match data (`matches` / `match_players` / `finish_events`) which CQ now writes, so the stream works correctly for CQ-run events WITHOUT modification — it reads the data regardless of which app ran the match.
+
+**Decision: stream STAYS ON CSP FOR NOW.** Not moved during the ops separation. This is deferred, not closed — revisit as its own decision after the ops switchover is settled. The resulting split event-day workflow (ops in CQ, stream on CSP) may be perfectly fine, especially since a different person often runs each (e.g. stream operator vs TO). If it later proves annoying, reconsider moving it to CQ then. No urgency; it works reading shared data.
+
 ---
 
 ## 4. The `tournaments` table split (the one genuinely shared write)
@@ -126,22 +152,24 @@ _To be filled in by inspecting CSP. Candidates:_
 
 ### Requires a data-contract check before removal (do NOT remove blind)
 - Anything in CSP that writes `tournament_entrants` — CQ reads these.
-- CSP ranking has TWO pipelines. Pipeline B (stats/W-L/finishes/PPS via `refresh_player_stats`) reads `matches`/`match_players`/`finish_events` directly through DB triggers — Clash Queue already writes everything this needs, SAFE as-is. Pipeline A (CLP / `players.ranking_points` via `award_tournament_points` RPC) does NOT read match results — it reads `tournament_entrants.placement` + `points_scale`. Clash Queue does NOT write placements or call the RPC. This is the one real gap. See §5.1.
+- CSP ranking has TWO pipelines. Pipeline B (stats/W-L/finishes/PPS via `refresh_player_stats`) reads `matches`/`match_players`/`finish_events` directly through DB triggers — **VERIFIED 28/07/2026** via SQL sim of CQ-shaped writes (triggers fire; `player_stats` updates correctly; cache and live-recompute agree). Remaining for B: one real tablet match to confirm CQ code produces the tested shape. Pipeline A (CLP / `players.ranking_points` via `award_tournament_points` RPC) does NOT read match results — it reads `tournament_entrants.placement` + `points_scale`. Still needs the Complete tournament step. See §5.1.
 - Anything touching the shared `tournaments` fields.
 
 **Removal rule:** before deleting any CSP surface, grep BOTH repos for reads/writes of the tables it touches. If Clash Queue reads a table CSP writes (or vice versa), that code is load-bearing across the boundary and cannot be removed without a migration plan.
 
-### 5.1 CLP gap — the one real separation blocker
+### 5.1 Rankings handshake — Pipeline B verified; CLP (A) still the gap
 
-When a ranking tournament completes on Clash Queue, CLP (`players.ranking_points`) stays stale unless someone writes `tournament_entrants.placement` AND calls `award_tournament_points(t_id)`. CQ does neither today. Pipeline B stats update fine via triggers; only CLP is affected.
+**Pipeline B (stats / W-L / finishes / PPS via `player_stats`):** VERIFIED 28/07/2026 via SQL simulation of CQ-shaped writes (`finish_events` during scoring → `matches.status='submitted'` → `match_players` winner/sets/points). DB triggers (`trg_refresh_finish_stats`, `trg_refresh_match_player_stats`) → `refresh_player_stats` fired automatically. Confirmed: W-L increments, finish counts (EXT/BUR/SPN), PEN attributed to fouling player (`scorer_player_id`), `tournaments_entered` from entrants, cache and live-recompute agree. CLP (`players.ranking_points`) correctly unchanged (no placement / no RPC). Remaining for B: one real tablet match to confirm live CQ code produces the tested write shape.
 
-Two ways to close it:
+**Pipeline A (CLP):** When a ranking tournament completes on Clash Queue, CLP stays stale unless someone writes `tournament_entrants.placement` AND calls `award_tournament_points(t_id)`. This is the remaining separation blocker for ranking events.
+
+Two ways to close CLP:
 - **(a) CQ owns completion** — a "Complete tournament" step derives final placements from Challonge standings, writes `tournament_entrants.placement`, calls `award_tournament_points`. Aligns with "all ops in CQ".
 - **(b) CSP keeps completion** — TO finishes in CQ, then CLP award triggered from CSP.
 
-**Decision: pursuing (a).** This also fills a genuine lifecycle gap — CQ currently has no tournament-completion step (pending → active only).
+**Decision: pursuing (a).** Complete tournament + CLP award path is tracked separately; stats (B) no longer blocks the ops-removal decision.
 
-Detail: `docs/csp-ranking-clp-readpath.txt` (inspection 27/07/2026).
+Detail: `docs/csp-ranking-clp-readpath.txt` (inspection 27/07/2026); stats handshake sim 28/07/2026.
 
 ---
 
@@ -152,8 +180,8 @@ Detail: `docs/csp-ranking-clp-readpath.txt` (inspection 27/07/2026).
 3. **After a real event runs on Clash Queue successfully:** begin Phase 1 of CSP removal (the "safe to remove early" list), each item gated by a two-repo grep.
 4. **Registration handshake formalised:** confirm CSP → CQ entrant flow works cleanly end-to-end, so players signing up on CSP appear as CQ entrants without manual intervention.
 5. **`tournaments` creator-of-record decided:** lock whether CSP or CQ (or both) create tournaments, and align the field contract.
-6. **Rankings read-path verified:** VERIFIED 27/07/2026 — Pipeline B safe as-is; Pipeline A (CLP) needs the Complete tournament handshake, tracked separately (§5.1).
-7. **Phase 2 CSP removal:** remove the load-bearing operational code once its CQ replacement is proven and the ranking read-path is verified.
+6. **Rankings read-path / stats handshake:** Pipeline B VERIFIED 28/07/2026 (SQL sim — CQ-shaped writes fire triggers; `player_stats` correct for W-L, finishes, PEN; cache = live-recompute). Remaining for B: one real tablet match. Pipeline A (CLP) still needs the Complete tournament handshake (§5.1).
+7. **Phase 2 CSP removal:** remove the load-bearing operational code once its CQ replacement is proven and the ranking read-path is verified. Registration display (§3.1) and stream tool (§3.3) stay on CSP through this phase.
 8. **CQ Complete tournament (CLP handshake):** implement §5.1(a) — placements from Challonge + `award_tournament_points` — before relying on CQ-only ops for ranking events.
 
 ---
