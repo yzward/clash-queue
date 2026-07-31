@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { AlertTriangle } from "lucide-react";
 import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
 import { BracketTab } from "@/components/bracket-tab";
 import { CompleteTournamentCard } from "@/components/complete-tournament-card";
+import { LiveWithFailingChecksWarning } from "@/components/live-with-failing-checks-warning";
 import { PlayersTab } from "@/components/players-tab";
 import { PreflightCard } from "@/components/preflight-card";
 import { SettingsTab } from "@/components/settings-tab";
@@ -218,6 +218,11 @@ function OverviewTab({
   const isCompleted = tournament.status === "completed";
   const isRanking = tournament.is_ranking_tournament !== false;
 
+  const failingRedChecks = (preflight?.checks ?? []).filter(
+    (c) => c.severity === "red" && c.status === "fail"
+  );
+  const hasFailingRedChecks = failingRedChecks.length > 0;
+
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-3">
@@ -254,49 +259,27 @@ function OverviewTab({
         />
       </div>
 
-      {isLive ? (
+      {isLive && hasFailingRedChecks && preflight ? (
         <div className="space-y-3">
-          {preflight?.checks.some(
-            (c) => c.severity === "red" && c.status === "fail"
-          ) ? (
-            <div
-              className="flex gap-2.5 rounded-[10px] px-4 py-3"
-              style={{
-                background: "rgba(251,191,36,0.08)",
-                border: "1px solid rgba(251,191,36,0.25)",
-              }}
-            >
-              <AlertTriangle
-                className="mt-0.5 size-4 shrink-0"
-                style={{ color: "#fbbf24" }}
-              />
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-[#fcd34d]">
-                  Live with failing pre-flight checks
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  This tournament is active but still fails:{" "}
-                  {preflight.checks
-                    .filter(
-                      (c) => c.severity === "red" && c.status === "fail"
-                    )
-                    .map((c) => c.title)
-                    .join(", ")}
-                  . New starts are blocked until checks pass — fix these when
-                  you can.
-                </p>
-              </div>
-            </div>
-          ) : null}
-          <CompleteTournamentCard
+          <LiveWithFailingChecksWarning failingChecks={failingRedChecks} />
+          <PreflightCard
             tournamentId={tournament.id}
             tournamentName={tournament.name}
-            isRankingTournament={isRanking}
-            challongeId={tournament.challonge_id}
-            matchCount={tournament.matchCount}
-            submittedMatchCount={tournament.submittedMatchCount}
+            initial={preflight}
+            confirmedPlayers={tournament.entrants.confirmed}
           />
         </div>
+      ) : null}
+
+      {isLive && !hasFailingRedChecks ? (
+        <CompleteTournamentCard
+          tournamentId={tournament.id}
+          tournamentName={tournament.name}
+          isRankingTournament={isRanking}
+          challongeId={tournament.challonge_id}
+          matchCount={tournament.matchCount}
+          submittedMatchCount={tournament.submittedMatchCount}
+        />
       ) : null}
 
       {isPending && preflight ? (
