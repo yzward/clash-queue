@@ -3,7 +3,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell";
-import { BracketTab } from "@/components/bracket-tab";
 import { CompleteTournamentCard } from "@/components/complete-tournament-card";
 import { LiveWithFailingChecksWarning } from "@/components/live-with-failing-checks-warning";
 import { PlayersTab } from "@/components/players-tab";
@@ -11,9 +10,7 @@ import { PreflightCard } from "@/components/preflight-card";
 import { SettingsTab } from "@/components/settings-tab";
 import { MatchesTab } from "@/components/matches-tab";
 import { SyncMatchesButton } from "@/components/sync-matches-button";
-import { ZonesTab } from "@/components/zones-tab";
 import { requireTO } from "@/lib/auth/require-to";
-import { listCourts } from "@/lib/data/courts";
 import { listEntrants } from "@/lib/data/entrants";
 import {
   getCourtStatuses,
@@ -39,28 +36,19 @@ const TABS = [
   { id: "overview", label: "Overview" },
   { id: "players", label: "Players" },
   { id: "arena", label: "Arena" },
-  { id: "zones", label: "Zones" },
   { id: "settings", label: "Settings" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
-type ArenaView = "matches" | "bracket";
 
-/** Old top-level tabs → new tab (+ optional arena view). */
-const LEGACY_TAB_REDIRECTS: Record<
-  string,
-  { tab: "arena" | "zones"; view?: ArenaView }
-> = {
-  matches: { tab: "arena", view: "matches" },
-  bracket: { tab: "arena", view: "bracket" },
-  courts: { tab: "zones" },
-  tablets: { tab: "zones" },
-};
-
-const ARENA_VIEWS: { id: ArenaView; label: string }[] = [
-  { id: "matches", label: "Matches" },
-  { id: "bracket", label: "Bracket" },
-];
+/** Old tabs / views → unified Arena. */
+const LEGACY_TO_ARENA = new Set([
+  "matches",
+  "bracket",
+  "courts",
+  "tablets",
+  "zones",
+]);
 
 function firstParam(raw: string | string[] | undefined): string | undefined {
   return Array.isArray(raw) ? raw[0] : raw;
@@ -72,47 +60,6 @@ function resolveTab(raw: string | string[] | undefined): TabId {
     return value as TabId;
   }
   return "overview";
-}
-
-function resolveArenaView(raw: string | string[] | undefined): ArenaView {
-  return firstParam(raw) === "bracket" ? "bracket" : "matches";
-}
-
-function SubTabToggle({
-  views,
-  activeView,
-  hrefFor,
-}: {
-  views: { id: string; label: string }[];
-  activeView: string;
-  hrefFor: (viewId: string) => string;
-}) {
-  return (
-    <div className="mb-5 flex flex-wrap gap-1.5">
-      {views.map((view) => {
-        const isActive = activeView === view.id;
-        return (
-          <Link
-            key={view.id}
-            href={hrefFor(view.id)}
-            className={cn(
-              "rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wider transition-colors",
-              isActive
-                ? "bg-[#a78bfa]/20 text-white"
-                : "text-muted-foreground hover:bg-white/5 hover:text-white/80"
-            )}
-            style={
-              isActive
-                ? { border: "1px solid rgba(167,139,250,0.55)" }
-                : { border: "1px solid rgba(255,255,255,0.08)" }
-            }
-          >
-            {view.label}
-          </Link>
-        );
-      })}
-    </div>
-  );
 }
 
 function capitaliseFormat(value: string | null | undefined): string | null {
@@ -388,31 +335,28 @@ export default async function TournamentDetailPage({
   const { id } = await params;
   const { tab: rawTab, view: rawView } = await searchParams;
   const legacyTab = firstParam(rawTab);
-  if (legacyTab && legacyTab in LEGACY_TAB_REDIRECTS) {
-    const mapped = LEGACY_TAB_REDIRECTS[legacyTab];
-    if (mapped.view) {
-      redirect(`/t/${id}?tab=${mapped.tab}&view=${mapped.view}`);
-    }
-    redirect(`/t/${id}?tab=${mapped.tab}`);
+  const viewParam = firstParam(rawView);
+
+  // Old tabs (matches/bracket/courts/tablets/zones) → unified Arena.
+  if (legacyTab && LEGACY_TO_ARENA.has(legacyTab)) {
+    redirect(`/t/${id}?tab=arena`);
   }
 
-  // Zones no longer has sub-views — strip legacy ?view=courts|tablets.
-  const viewParam = firstParam(rawView);
+  // Strip legacy Arena/Zones view params (?view=matches|bracket|courts|tablets).
   if (
-    resolveTab(rawTab) === "zones" &&
-    (viewParam === "courts" || viewParam === "tablets")
+    resolveTab(rawTab) === "arena" &&
+    viewParam &&
+    ["matches", "bracket", "courts", "tablets"].includes(viewParam)
   ) {
-    redirect(`/t/${id}?tab=zones`);
+    redirect(`/t/${id}?tab=arena`);
   }
 
   const activeTab = resolveTab(rawTab);
-  const arenaView = resolveArenaView(rawView);
 
-  const [tournament, preflight, courts, entrants, matchesWithContext] =
+  const [tournament, preflight, entrants, matchesWithContext] =
     await Promise.all([
       getTournamentDetail(id),
       runPreflightChecks(id),
-      listCourts(id),
       listEntrants(id),
       listMatchesWithContext(id),
     ]);
@@ -494,9 +438,7 @@ export default async function TournamentDetailPage({
           const href =
             tab.id === "overview"
               ? `/t/${tournament.id}`
-              : tab.id === "arena"
-                ? `/t/${tournament.id}?tab=arena&view=matches`
-                : `/t/${tournament.id}?tab=${tab.id}`;
+              : `/t/${tournament.id}?tab=${tab.id}`;
 
           return (
             <Link
@@ -540,43 +482,10 @@ export default async function TournamentDetailPage({
             challongeId={tournament.challonge_id}
           />
         ) : activeTab === "arena" ? (
-          <>
-            <SubTabToggle
-              views={ARENA_VIEWS}
-              activeView={arenaView}
-              hrefFor={(viewId) =>
-                `/t/${tournament.id}?tab=arena&view=${viewId}`
-              }
-            />
-            {arenaView === "bracket" ? (
-              <BracketTab
-                tournament={{
-                  id: tournament.id,
-                  name: tournament.name,
-                  challonge_id: tournament.challonge_id,
-                }}
-              />
-            ) : (
-              <MatchesTab
-                tournament={tournament}
-                initialCourts={courtStatuses}
-                initialMatches={matchesWithContext}
-              />
-            )}
-          </>
-        ) : activeTab === "zones" ? (
-          <ZonesTab
-            initialCourts={courts}
-            tournamentId={tournament.id}
-            occupancyLabels={Object.fromEntries(
-              courtStatuses.map((cs) => {
-                const match = cs.current_match;
-                if (!match) return [cs.court.id, null] as const;
-                const p1 = match.players[0]?.display_name ?? "TBD";
-                const p2 = match.players[1]?.display_name ?? "TBD";
-                return [cs.court.id, `${p1} vs ${p2}`] as const;
-              })
-            )}
+          <MatchesTab
+            tournament={tournament}
+            initialCourts={courtStatuses}
+            initialMatches={matchesWithContext}
           />
         ) : activeTab === "settings" ? (
           <SettingsTab

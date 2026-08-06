@@ -58,7 +58,7 @@ export function BracketTab({
           <h2 className="text-base font-medium text-white">Bracket</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Live bracket embedded from Challonge. Actions like reporting scores
-            must be done through Clash Queue (Matches tab), not the embed.
+            must be done through Clash Queue (Arena), not the embed.
           </p>
         </div>
         <Button

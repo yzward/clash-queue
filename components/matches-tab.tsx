@@ -5,15 +5,20 @@ import {
   useEffectEvent,
   useMemo,
   useOptimistic,
+  useRef,
   useState,
   useTransition,
+  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import {
   ChevronDown,
   ChevronUp,
+  Copy,
+  ExternalLink,
   Loader2,
   MoreHorizontal,
+  Plus,
   Search,
   X,
 } from "lucide-react";
@@ -22,11 +27,15 @@ import { toast } from "sonner";
 import {
   assignCourtAction,
   checkNewMatchesAvailableAction,
+  createCourtAction,
+  deleteCourtAction,
   refreshMatchesTabAction,
+  renameCourtAction,
   switchMatchCourtAction,
   syncMatchesAction,
   unassignCourtAction,
 } from "@/app/t/[id]/actions";
+import { BracketTab } from "@/components/bracket-tab";
 import { MatchDetailDrawer } from "@/components/match-detail-drawer";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +50,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -55,6 +65,44 @@ import type {
 import type { TournamentDetail } from "@/lib/data/tournament-detail";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+
+const FALLBACK_ORIGIN = "https://queue.clash.co.nz";
+
+function displayHostPath(origin: string, courtId: string): string {
+  try {
+    const host = new URL(origin).host;
+    return `${host}/tablet/${courtId}`;
+  } catch {
+    return `queue.clash.co.nz/tablet/${courtId}`;
+  }
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+
+  try {
+    const input = document.createElement("input");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    input.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(input);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
 type SubmittedSort = "recent" | "round" | "player";
 
@@ -290,16 +338,101 @@ function CourtAssignMenu({
   );
 }
 
+function TabletUrlRow({
+  courtId,
+  courtName,
+  origin,
+}: {
+  courtId: string;
+  courtName: string;
+  origin: string;
+}) {
+  const isTempId = courtId.startsWith("temp-");
+  const fullUrl = `${origin}/tablet/${courtId}`;
+  const displayUrl = displayHostPath(origin, courtId);
+
+  return (
+    <div
+      className="mt-3 pt-3"
+      style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+    >
+      <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        Tablet URL
+      </p>
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <p className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+          {isTempId ? "Generating…" : displayUrl}
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={isTempId}
+          className="h-7 shrink-0 gap-1 px-2 text-[10px] text-muted-foreground hover:text-white"
+          onClick={async (e) => {
+            e.stopPropagation();
+            const ok = await copyText(fullUrl);
+            if (ok) {
+              toast.success(`Copied ${courtName} tablet URL`);
+            } else {
+              toast.error("Copy this URL manually", {
+                description: fullUrl,
+              });
+            }
+          }}
+        >
+          <Copy className="size-3" />
+          Copy
+        </Button>
+        {isTempId ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            disabled
+            className="shrink-0 text-muted-foreground"
+            aria-label={`Open ${courtName} tablet URL`}
+          >
+            <ExternalLink className="size-3.5" />
+          </Button>
+        ) : (
+          <Button
+            asChild
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="shrink-0 text-muted-foreground hover:text-white"
+          >
+            <a
+              href={fullUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Open ${courtName} tablet URL`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ExternalLink className="size-3.5" />
+            </a>
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CourtCard({
   courtStatus,
   free,
+  origin,
   onSelect,
   onSwitchCourt,
   onUnassign,
+  onRename,
+  onRequestDelete,
   busy = false,
 }: {
   courtStatus: CourtWithStatus;
   free: CourtWithStatus[];
+  origin: string;
   onSelect: (match: MatchWithContext) => void;
   onSwitchCourt: (
     match: MatchWithContext,
@@ -308,35 +441,125 @@ function CourtCard({
     oldCourtName: string
   ) => void;
   onUnassign: (matchId: string) => void;
+  onRename: (courtId: string, name: string) => void;
+  onRequestDelete: (courtId: string, courtName: string, inUse: boolean) => void;
   busy?: boolean;
 }) {
   const current = courtStatus.current_match;
   const occupied = Boolean(current);
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState(courtStatus.court.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraftName(courtStatus.court.name);
+    }
+  }, [courtStatus.court.name, editing]);
+
+  const startRename = () => {
+    setDraftName(courtStatus.court.name);
+    setEditing(true);
+  };
+
+  const cancelRename = () => {
+    setDraftName(courtStatus.court.name);
+    setEditing(false);
+  };
+
+  const commitRename = () => {
+    const next = draftName.trim();
+    if (!next || next === courtStatus.court.name) {
+      cancelRename();
+      return;
+    }
+    setEditing(false);
+    onRename(courtStatus.court.id, next);
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitRename();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
+  };
+
+  const nameBlock = editing ? (
+    <Input
+      ref={inputRef}
+      value={draftName}
+      onChange={(event) => setDraftName(event.target.value)}
+      onBlur={commitRename}
+      onKeyDown={handleKeyDown}
+      className="h-7 text-[12px] text-white"
+      aria-label="Court name"
+      onClick={(e) => e.stopPropagation()}
+    />
+  ) : (
+    <p className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+      {courtStatus.court.name}
+    </p>
+  );
 
   if (!occupied || !current) {
     return (
       <div
-        className="flex min-h-[86px] cursor-pointer flex-col justify-center rounded-[10px] px-3.5 py-3 transition-colors hover:bg-white/[0.05]"
+        className="flex min-h-[86px] flex-col rounded-[10px] px-3.5 py-3 transition-colors"
         style={{
           background: "rgba(255,255,255,0.02)",
           border: "1px dashed rgba(255,255,255,0.1)",
         }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = "rgba(167,139,250,0.45)";
-          e.currentTarget.style.background = "rgba(167,139,250,0.06)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
-          e.currentTarget.style.background = "rgba(255,255,255,0.02)";
-        }}
       >
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-          {courtStatus.court.name}
-        </p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">{nameBlock}</div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="shrink-0 text-muted-foreground hover:text-white"
+                aria-label={`Court options for ${courtStatus.court.name}`}
+              >
+                <MoreHorizontal className="size-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={startRename}>Rename</DropdownMenuItem>
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={() =>
+                  onRequestDelete(
+                    courtStatus.court.id,
+                    courtStatus.court.name,
+                    false
+                  )
+                }
+              >
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         <p className="mt-2 text-center text-sm text-muted-foreground">Free</p>
         <p className="mt-1 text-center text-[10px] text-muted-foreground/70">
-          Drop next match here
+          Assign a queue match here
         </p>
+        <TabletUrlRow
+          courtId={courtStatus.court.id}
+          courtName={courtStatus.court.name}
+          origin={origin}
+        />
       </div>
     );
   }
@@ -356,7 +579,8 @@ function CourtCard({
         borderTop: "2px solid #22c55e",
       }}
     >
-      <div className="absolute top-2 right-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">{nameBlock}</div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -365,7 +589,7 @@ function CourtCard({
               size="icon-xs"
               disabled={busy}
               className={cn(
-                "cursor-pointer border border-transparent text-muted-foreground transition-colors",
+                "shrink-0 cursor-pointer border border-transparent text-muted-foreground transition-colors",
                 "hover:border-white/20 hover:bg-white/10 hover:text-white",
                 "disabled:cursor-not-allowed disabled:opacity-60"
               )}
@@ -416,6 +640,20 @@ function CourtCard({
             <DropdownMenuItem onClick={() => onSelect(current)}>
               Open details
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={startRename}>Rename</DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() =>
+                onRequestDelete(
+                  courtStatus.court.id,
+                  courtStatus.court.name,
+                  true
+                )
+              }
+            >
+              Delete
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -423,12 +661,9 @@ function CourtCard({
       <button
         type="button"
         onClick={() => onSelect(current)}
-        className="pr-7 text-left transition-opacity hover:opacity-90"
+        className="mt-1.5 text-left transition-opacity hover:opacity-90"
       >
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-          {courtStatus.court.name}
-        </p>
-        <p className="mt-1.5 text-sm font-medium text-white">
+        <p className="text-sm font-medium text-white">
           {matchupLabel(current)}
         </p>
         <p className="mt-1 text-[11px] text-muted-foreground">
@@ -445,6 +680,12 @@ function CourtCard({
           </p>
         ) : null}
       </button>
+
+      <TabletUrlRow
+        courtId={courtStatus.court.id}
+        courtName={courtStatus.court.name}
+        origin={origin}
+      />
     </div>
   );
 }
@@ -545,11 +786,22 @@ export function MatchesTab({
   const [submittedSearch, setSubmittedSearch] = useState("");
   const [submittedSearchDebounced, setSubmittedSearchDebounced] =
     useState("");
+  const [origin, setOrigin] = useState(FALLBACK_ORIGIN);
+  const [showBracket, setShowBracket] = useState(false);
+  const [addCourtOpen, setAddCourtOpen] = useState(false);
+  const [newCourtName, setNewCourtName] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [courtPending, startCourtTransition] = useTransition();
   const [, startTransition] = useTransition();
 
   const matches = optimistic.matches;
   const courts = optimistic.courts;
   const free = useMemo(() => freeCourts(courts), [courts]);
+  const defaultCourtName = `Court ${courts.length + 1}`;
 
   const selected =
     matches.find((m) => m.match.id === selectedId) ?? null;
@@ -620,6 +872,12 @@ export function MatchesTab({
   useEffect(() => {
     setBase({ matches: initialMatches, courts: initialCourts });
   }, [initialMatches, initialCourts]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.location.origin) {
+      setOrigin(window.location.origin);
+    }
+  }, []);
 
   useEffect(() => {
     void checkNewMatches();
@@ -838,6 +1096,69 @@ export function MatchesTab({
     });
   }
 
+  function handleRenameCourt(courtId: string, name: string) {
+    startCourtTransition(async () => {
+      const result = await renameCourtAction(courtId, name, tournament.id);
+      if (!result.ok) {
+        toast.error(result.error);
+        refresh();
+        return;
+      }
+      toast.success("Court renamed");
+      refresh();
+    });
+  }
+
+  function handleRequestDelete(
+    courtId: string,
+    courtName: string,
+    inUse: boolean
+  ) {
+    if (inUse) {
+      toast.error(
+        "Can't delete a court that's in use — send the match back to queue first"
+      );
+      return;
+    }
+    setDeleteError(null);
+    setDeleteTarget({ id: courtId, name: courtName });
+  }
+
+  function confirmDeleteCourt() {
+    if (!deleteTarget) return;
+    const target = deleteTarget;
+    startCourtTransition(async () => {
+      const result = await deleteCourtAction(target.id, tournament.id);
+      if (!result.ok) {
+        setDeleteError(result.error);
+        toast.error(result.error);
+        return;
+      }
+      setDeleteTarget(null);
+      toast.success(`Deleted ${target.name}`);
+      refresh();
+    });
+  }
+
+  function openAddCourt() {
+    setNewCourtName(defaultCourtName);
+    setAddCourtOpen(true);
+  }
+
+  function submitAddCourt() {
+    const name = newCourtName.trim() || defaultCourtName;
+    setAddCourtOpen(false);
+    startCourtTransition(async () => {
+      const result = await createCourtAction(tournament.id, name);
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      toast.success(`Added ${name}`);
+      refresh();
+    });
+  }
+
   return (
     <TooltipProvider>
       <div className="space-y-6">
@@ -865,27 +1186,82 @@ export function MatchesTab({
         ) : null}
 
         <section>
-          <SectionLabel>◆ Courts · {courts.length}</SectionLabel>
+          <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+            <p
+              className="text-[10px] font-semibold uppercase tracking-[0.14em]"
+              style={{ color: "rgba(255,255,255,0.45)" }}
+            >
+              ◆ Courts · {courts.length}
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1 px-2 text-[11px] text-muted-foreground hover:text-white"
+                onClick={() => setShowBracket((v) => !v)}
+              >
+                {showBracket ? "Hide bracket" : "View bracket"}
+                <ExternalLink className="size-3" />
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={openAddCourt}
+                className="h-7 gap-1 bg-[#a78bfa] px-2.5 text-[11px] text-[#0a0a12] hover:bg-[#b79afc]"
+              >
+                <Plus className="size-3.5" />
+                Add court
+              </Button>
+            </div>
+          </div>
+
+          {showBracket ? (
+            <div className="mb-5">
+              <BracketTab
+                tournament={{
+                  id: tournament.id,
+                  name: tournament.name,
+                  challonge_id: tournament.challonge_id,
+                }}
+              />
+            </div>
+          ) : null}
+
           {courts.length === 0 ? (
             <div
-              className="rounded-[10px] px-4 py-8 text-center text-sm text-muted-foreground"
+              className="flex flex-col items-center justify-center gap-4 rounded-[10px] px-4 py-10 text-center"
               style={{
                 background: "rgba(255,255,255,0.03)",
                 border: "1px solid rgba(255,255,255,0.06)",
               }}
             >
-              No courts configured yet
+              <p className="max-w-sm text-sm text-muted-foreground">
+                No courts yet — add one to enable scoring and generate its tablet
+                URL.
+              </p>
+              <Button
+                type="button"
+                onClick={openAddCourt}
+                className="gap-1.5 bg-[#a78bfa] text-[#0a0a12] hover:bg-[#b79afc]"
+              >
+                <Plus className="size-3.5" />
+                Add court
+              </Button>
             </div>
           ) : (
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2.5">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
               {courts.map((courtStatus) => (
                 <CourtCard
                   key={courtStatus.court.id}
                   courtStatus={courtStatus}
                   free={free}
+                  origin={origin}
                   onSelect={selectMatch}
                   onSwitchCourt={requestSwitchCourt}
                   onUnassign={handleUnassignCourt}
+                  onRename={handleRenameCourt}
+                  onRequestDelete={handleRequestDelete}
                   busy={
                     courtStatus.current_match != null &&
                     busyMatchId === courtStatus.current_match.match.id
@@ -1133,6 +1509,98 @@ export function MatchesTab({
         onMatchUpdated={patchFromDrawer}
         onRefresh={refresh}
       />
+
+      <Dialog open={addCourtOpen} onOpenChange={setAddCourtOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add court</DialogTitle>
+            <DialogDescription>
+              Tablets need at least one court to score on.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label
+              htmlFor="arena-court-name"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              Court name
+            </label>
+            <Input
+              id="arena-court-name"
+              value={newCourtName}
+              onChange={(event) => setNewCourtName(event.target.value)}
+              placeholder="Court 1"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  submitAddCourt();
+                }
+              }}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAddCourtOpen(false)}
+              disabled={courtPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={submitAddCourt}
+              disabled={courtPending}
+            >
+              {courtPending ? "Adding…" : "Add"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTarget(null);
+            setDeleteError(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete court</DialogTitle>
+            <DialogDescription>
+              Delete {deleteTarget?.name}? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {deleteError ? (
+            <p className="text-sm text-destructive">{deleteError}</p>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDeleteTarget(null);
+                setDeleteError(null);
+              }}
+              disabled={courtPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={confirmDeleteCourt}
+              disabled={courtPending}
+            >
+              {courtPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </TooltipProvider>
   );
 }

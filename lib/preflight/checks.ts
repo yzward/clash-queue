@@ -372,7 +372,7 @@ export async function runPreflightChecks(
           detail: "No matches in the database yet",
           fix_action: challongeId
             ? { label: "Generate matches", action: "generate_matches" }
-            : { label: "Open matches", tab: "arena", view: "matches" },
+            : { label: "Open Arena", tab: "arena" },
         })
   );
 
@@ -392,7 +392,7 @@ export async function runPreflightChecks(
           detail: "Add at least one court",
           fix_action: {
             label: "Configure courts",
-            tab: "zones",
+            tab: "arena",
           },
         })
   );
